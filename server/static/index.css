@@ -1,0 +1,7 @@
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:#111; color:#eee; max-width:600px; margin:0 auto; padding:20px 16px; }
+a { color:#4da6ff; text-decoration:none; }
+h1 { font-size:22px; font-weight:600; margin-bottom:20px; }
+.index-item { padding:14px 0; border-bottom:1px solid #2a2a2a; }
+.index-item a { font-size:17px; }
+.sub-badge { color:#888; font-size:12px; }

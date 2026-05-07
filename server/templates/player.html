@@ -1,104 +1,20 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
-<title>{{title}}</title>
-<style>
-* { margin:0; padding:0; box-sizing:border-box; }
-html, body { width:100%; height:100%; overflow:hidden; background:#000; }
-body {
-  display:flex; flex-direction:column;
-  padding-top:env(safe-area-inset-top);
-  padding-bottom:env(safe-area-inset-bottom);
-}
-#top-bar {
-  display:flex; align-items:center; justify-content:space-between;
-  padding:8px 12px; flex-shrink:0;
-  background:#000;
-}
-#back-btn { color:#fff; font-size:16px; text-decoration:none; }
-#player-container {
-  flex:1; position:relative; min-height:0;
-}
-video {
-  width:100%; height:100%; display:block;
-  position:absolute; top:0; left:0;
-  background:#000; object-fit:contain;
-}
-#fs-btn {
-  position:absolute; bottom:60px; right:12px; z-index:10;
-  background:rgba(0,0,0,0.55); border:1px solid rgba(255,255,255,0.25);
-  color:#fff; width:38px; height:38px; border-radius:8px;
-  display:flex; align-items:center; justify-content:center;
-  cursor:pointer; padding:0;
-  -webkit-backdrop-filter:blur(4px); backdrop-filter:blur(4px);
-}
-#fs-btn svg { width:16px; height:16px; }
-#fs-exit-btn {
-  position:fixed; top:max(12px,env(safe-area-inset-top)); right:12px; z-index:10000;
-  background:rgba(0,0,0,0.55); border:1px solid rgba(255,255,255,0.25);
-  color:#fff; width:38px; height:38px; border-radius:50%;
-  font-size:18px; line-height:38px; text-align:center; cursor:pointer;
-  display:none; padding:0;
-  -webkit-backdrop-filter:blur(4px); backdrop-filter:blur(4px);
-}
-.custom-fullscreen #top-bar { display:none; }
-.custom-fullscreen #player-container {
-  position:fixed; z-index:9999; top:0; left:100vw;
-  transform:rotate(90deg);
-  transform-origin:top left;
-}
-.custom-fullscreen #fs-btn { display:none; }
-.custom-fullscreen #fs-exit-btn { display:block; }
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+  <title>{{title}}</title>
+  <link rel="stylesheet" href="/static/player.css">
 </head>
 <body>
 <div id="top-bar">
   <a id="back-btn" href="/">&larr; Back</a>
 </div>
 <div id="player-container">
-  <video id="v" controls playsinline webkit-playsinline src="{{playlist_url}}">{{sub_track}}</video>
+  <video id="v" controls playsinline webkit-playsinline src="{{playlist_url}}" data-video-id="{{video_id}}">{{sub_track}}</video>
   <button id="fs-btn" title="Fullscreen"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 5V2h3M14 11v3h-3M11 2h3v3M5 14H2v-3"/></svg></button>
   <button id="fs-exit-btn" title="Exit fullscreen">&times;</button>
 </div>
-<script>
-var v=document.getElementById('v');
-var k='ms-pos-{{video_id}}';
-var t=parseFloat(localStorage.getItem(k)||0);
-if(t>1)v.currentTime=t;
-setInterval(function(){try{if(v.currentTime>0)localStorage.setItem(k,v.currentTime);}catch(e){}},5000);
-v.addEventListener('pause',function(){try{localStorage.setItem(k,v.currentTime);}catch(e){}});
-v.addEventListener('seeked',function(){try{localStorage.setItem(k,v.currentTime);}catch(e){}});
-v.addEventListener('ended',function(){try{localStorage.removeItem(k);}catch(e){}});
-function lockLandscape(){ screen.orientation.lock('landscape').catch(function(){}); }
-function unlockOrientation(){ try{screen.orientation.unlock();}catch(e){} }
-document.addEventListener('fullscreenchange',function(){ if(document.fullscreenElement)lockLandscape();else unlockOrientation(); });
-document.addEventListener('webkitfullscreenchange',function(){ if(document.webkitFullscreenElement)lockLandscape();else unlockOrientation(); });
-v.addEventListener('webkitbeginfullscreen',lockLandscape);
-v.addEventListener('webkitendfullscreen',unlockOrientation);
-
-var fsBtn=document.getElementById('fs-btn');
-var fsExitBtn=document.getElementById('fs-exit-btn');
-function enterFS(){
-  var pc=document.getElementById('player-container');
-  pc.style.width=window.innerHeight+'px';
-  pc.style.height=window.innerWidth+'px';
-  document.body.classList.add('custom-fullscreen');
-  try{screen.orientation.lock('landscape');}catch(e){}
-}
-function exitFS(){
-  var pc=document.getElementById('player-container');
-  pc.style.width='';
-  pc.style.height='';
-  document.body.classList.remove('custom-fullscreen');
-  try{screen.orientation.unlock();}catch(e){}
-}
-fsBtn.addEventListener('click',function(e){ e.stopPropagation(); enterFS(); });
-fsExitBtn.addEventListener('click',function(e){ e.stopPropagation(); exitFS(); });
-window.addEventListener('orientationchange',function(){
-  if(document.body.classList.contains('custom-fullscreen')) exitFS();
-});
-</script>
+<script src="/static/player.js"></script>
 </body>
 </html>

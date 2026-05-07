@@ -11,12 +11,13 @@ from .transcoder import Transcoder
 
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
+_STATIC_DIR = Path(__file__).parent / "static"
 
 _INDEX_TPL = (_TEMPLATE_DIR / "index.html").read_text(encoding="utf-8")
 _PLAYER_TPL = (_TEMPLATE_DIR / "player.html").read_text(encoding="utf-8")
 
-_INDEX_ITEM = '<div style="padding:14px 0;border-bottom:1px solid #2a2a2a;"><a href="/play/{{id}}" style="font-size:17px;">{{name}}</a>{{sub_badge}}</div>'
-_SUB_BADGE = ' <span style="color:#888;font-size:12px;">CC</span>'
+_INDEX_ITEM = '<div class="index-item"><a href="/play/{{id}}">{{name}}</a>{{sub_badge}}</div>'
+_SUB_BADGE = ' <span class="sub-badge">CC</span>'
 
 _SEGMENT_RE = re.compile(r"^/stream/([a-f0-9]+)/segment_\d+\.ts$")
 _PLAYLIST_RE = re.compile(r"^/stream/([a-f0-9]+)/playlist\.m3u8$")
@@ -47,6 +48,8 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
                 elif path.startswith("/play/"):
                     video_id = path.rsplit("/", 1)[-1]
                     self._serve_player(video_id)
+                elif path.startswith("/static/"):
+                    self._serve_static(path)
                 elif path.startswith("/stream/"):
                     if m := _PLAYLIST_RE.match(path):
                         self._serve_playlist(m.group(1))
@@ -148,6 +151,28 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", len(content))
             self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(content)
+
+        def _serve_static(self, url_path):
+            relative = url_path[len("/static/"):]
+            file_path = _STATIC_DIR / relative
+            if not file_path.is_file():
+                self._serve_404()
+                return
+            ext = file_path.suffix.lower()
+            content_types = {
+                ".css": "text/css; charset=utf-8",
+                ".js": "application/javascript; charset=utf-8",
+                ".png": "image/png",
+                ".svg": "image/svg+xml",
+                ".ico": "image/x-icon",
+            }
+            content_type = content_types.get(ext, "application/octet-stream")
+            content = file_path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", len(content))
             self.end_headers()
             self.wfile.write(content)
 
