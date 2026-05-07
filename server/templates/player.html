@@ -45,9 +45,8 @@ video {
 }
 .custom-fullscreen #top-bar { display:none; }
 .custom-fullscreen #player-container {
-  position:fixed; z-index:9999; top:0; left:0;
-  width:100vh; height:100vw;
-  transform:rotate(90deg) translateY(-100%);
+  position:fixed; z-index:9999; top:0; left:100vw;
+  transform:rotate(90deg);
   transform-origin:top left;
 }
 .custom-fullscreen #fs-btn { display:none; }
@@ -82,10 +81,16 @@ v.addEventListener('webkitendfullscreen',unlockOrientation);
 var fsBtn=document.getElementById('fs-btn');
 var fsExitBtn=document.getElementById('fs-exit-btn');
 function enterFS(){
+  var pc=document.getElementById('player-container');
+  pc.style.width=window.innerHeight+'px';
+  pc.style.height=window.innerWidth+'px';
   document.body.classList.add('custom-fullscreen');
   try{screen.orientation.lock('landscape');}catch(e){}
 }
 function exitFS(){
+  var pc=document.getElementById('player-container');
+  pc.style.width='';
+  pc.style.height='';
   document.body.classList.remove('custom-fullscreen');
   try{screen.orientation.unlock();}catch(e){}
 }
