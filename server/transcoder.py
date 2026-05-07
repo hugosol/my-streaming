@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -52,9 +53,16 @@ class Transcoder:
             temp_dir = self.get_temp_dir(index)
             self._clean_dir(temp_dir)
 
-            playlist = temp_dir / "playlist.m3u8"
+            duration = self._get_duration(video_path)
+
             segment_pattern = temp_dir / "segment_%d.ts"
             log_file = temp_dir / "ffmpeg.log"
+
+            if duration is not None:
+                self._generate_static_playlist(temp_dir, duration)
+                ffmpeg_playlist = temp_dir / "_ffmpeg.m3u8"
+            else:
+                ffmpeg_playlist = temp_dir / "playlist.m3u8"
 
             cmd = [
                 "ffmpeg", "-y",
@@ -68,7 +76,7 @@ class Transcoder:
                 "-hls_time", "10",
                 "-hls_list_size", "0",
                 "-hls_segment_filename", str(segment_pattern),
-                str(playlist),
+                str(ffmpeg_playlist),
             ]
 
             creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -116,6 +124,44 @@ class Transcoder:
                         item.unlink()
             except OSError:
                 pass
+
+    def _get_duration(self, video_path: str) -> float | None:
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "json", video_path],
+                capture_output=True, text=True, timeout=30,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                data = json.loads(result.stdout)
+                return float(data["format"]["duration"])
+        except Exception:
+            pass
+        return None
+
+    def _generate_static_playlist(self, temp_dir: Path, duration: float):
+        hls_time = 10
+        segment_count = int(duration / hls_time) + (1 if duration % hls_time > 0.01 else 0)
+        segment_count = max(1, segment_count)
+
+        lines = [
+            "#EXTM3U",
+            "#EXT-X-VERSION:3",
+            f"#EXT-X-TARGETDURATION:{hls_time}",
+            "#EXT-X-PLAYLIST-TYPE:VOD",
+        ]
+
+        for i in range(segment_count):
+            seg_duration = min(hls_time, duration - i * hls_time)
+            seg_duration = max(0.001, seg_duration)
+            lines.append(f"#EXTINF:{seg_duration:.6f},")
+            lines.append(f"segment_{i}.ts")
+
+        lines.append("#EXT-X-ENDLIST")
+
+        playlist_path = temp_dir / "playlist.m3u8"
+        playlist_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def _clean_dir(self, d: Path):
         if not d.exists():

@@ -143,6 +143,14 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
         def _serve_file(self, url_path, content_type):
             relative = url_path[len("/stream/"):]
             file_path = temp_root / relative
+            if not file_path.exists() and file_path.suffix == ".ts":
+                video_dir = file_path.parent
+                waited = 0
+                while not file_path.exists() and waited < 600:
+                    if not (video_dir / "playlist.m3u8").exists():
+                        break
+                    time.sleep(0.1)
+                    waited += 1
             if not file_path.exists():
                 self._serve_404()
                 return
