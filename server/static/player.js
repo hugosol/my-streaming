@@ -28,17 +28,33 @@ var fsBtn = document.getElementById('fs-btn');
 var fsExitBtn = document.getElementById('fs-exit-btn');
 function enterFS() {
   var pc = document.getElementById('player-container');
-  pc.style.width = window.innerHeight + 'px';
-  pc.style.height = window.innerWidth + 'px';
-  document.body.classList.add('custom-fullscreen');
-  try { screen.orientation.lock('landscape'); } catch(e) {}
+  var fadeOut = pc.animate({ opacity: [1, 0] }, { duration: 200, fill: 'forwards' });
+  fadeOut.onfinish = function() {
+    pc.style.position = 'fixed';
+    pc.style.zIndex = '9999';
+    pc.style.top = '0';
+    pc.style.left = '100vw';
+    pc.style.width = window.innerHeight + 'px';
+    pc.style.height = window.innerWidth + 'px';
+    document.body.classList.add('custom-fullscreen');
+    pc.animate({ opacity: [0, 1] }, { duration: 200, fill: 'forwards' });
+    try { screen.orientation.lock('landscape'); } catch(e) {}
+  };
 }
 function exitFS() {
   var pc = document.getElementById('player-container');
-  pc.style.width = '';
-  pc.style.height = '';
-  document.body.classList.remove('custom-fullscreen');
-  try { screen.orientation.unlock(); } catch(e) {}
+  var fadeOut = pc.animate({ opacity: [1, 0] }, { duration: 200, fill: 'forwards' });
+  fadeOut.onfinish = function() {
+    document.body.classList.remove('custom-fullscreen');
+    pc.style.position = '';
+    pc.style.zIndex = '';
+    pc.style.top = '';
+    pc.style.left = '';
+    pc.style.width = '';
+    pc.style.height = '';
+    pc.animate({ opacity: [0, 1] }, { duration: 200, fill: 'forwards' });
+    try { screen.orientation.unlock(); } catch(e) {}
+  };
 }
 fsBtn.addEventListener('click', function(e) { e.stopPropagation(); enterFS(); });
 fsExitBtn.addEventListener('click', function(e) { e.stopPropagation(); exitFS(); });
