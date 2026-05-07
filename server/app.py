@@ -25,7 +25,7 @@ _VTT_RE = re.compile(r"^/stream/([a-f0-9]+)/subtitles\.vtt$")
 _EXTINF_RE = re.compile(r"#EXTINF:([\d.]+),\s*\n(segment_\d+\.ts)")
 
 
-def _merge_playlists(static_path: Path, ffmpeg_path: Path) -> str:
+def _merge_playlists(static_path: Path, ffmpeg_path: Path, start_at: float = 0) -> str:
     static_text = static_path.read_text(encoding="utf-8")
     static_pairs = _EXTINF_RE.findall(static_text)
 
@@ -36,6 +36,8 @@ def _merge_playlists(static_path: Path, ffmpeg_path: Path) -> str:
             ffmpeg_durations[name] = float(dur_str)
 
     lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:10", "#EXT-X-PLAYLIST-TYPE:VOD"]
+    if start_at > 0:
+        lines.append(f"#EXT-X-START:TIME-OFFSET={start_at:.6f}")
     for dur_str, name in static_pairs:
         dur = ffmpeg_durations.get(name, float(dur_str))
         lines.append(f"#EXTINF:{dur:.6f},")
@@ -135,12 +137,20 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
                 self._serve_404()
                 return
 
+            parsed = urlparse(self.path)
+            start_at = float(parse_qs(parsed.query).get("start", ["0"])[0])
+
             temp_dir = transcoder.get_temp_dir(video_id)
             ffmpeg_path = temp_dir / "_ffmpeg.m3u8"
             if ffmpeg_path.exists():
-                content = _merge_playlists(playlist_path, ffmpeg_path).encode("utf-8")
+                content = _merge_playlists(playlist_path, ffmpeg_path, start_at).encode("utf-8")
             else:
                 content = playlist_path.read_bytes()
+                if start_at > 0:
+                    tag = f"\n#EXT-X-START:TIME-OFFSET={start_at:.6f}\n".encode("utf-8")
+                    idx = content.find(b"\n#EXTINF:")
+                    if idx >= 0:
+                        content = content[:idx] + tag + content[idx:]
 
             self.send_response(200)
             self.send_header("Content-Type", "application/vnd.apple.mpegurl")
