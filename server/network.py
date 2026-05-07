@@ -57,5 +57,11 @@ def start_mdns(ip, port, name="my-streaming"):
 
 
 def stop_mdns(zc, info):
-    zc.unregister_service(info)
-    zc.close()
+    import asyncio
+    async def _cleanup():
+        await zc.async_unregister_service(info)
+        await zc.async_close()
+    try:
+        asyncio.run(_cleanup())
+    except Exception:
+        pass
