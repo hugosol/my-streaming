@@ -1,1 +1,2 @@
 qrcode>=7.4
+zeroconf>=0.130

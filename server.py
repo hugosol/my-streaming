@@ -8,7 +8,7 @@ from socketserver import ThreadingMixIn
 import qrcode
 
 from server.app import make_handler
-from server.network import find_free_port, get_lan_ip
+from server.network import find_port, get_lan_ip
 from server.scanner import scan_directory
 from server.transcoder import Transcoder
 
@@ -49,15 +49,33 @@ def main():
     videos = scan_directory(str(dir_path))
 
     ip = get_lan_ip()
-    port = find_free_port()
+    port = find_port(8888)
 
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
     transcoder = Transcoder(TEMP_DIR)
     transcoder.cleanup_expired()
 
+    zc = None
+    mdns_info = None
+    try:
+        from server.network import start_mdns, stop_mdns
+        zc, mdns_info = start_mdns(ip, port)
+        url = f"http://my-streaming.local:{port}/"
+        print(f"mDNS: {url} (fallback: http://{ip}:{port}/)")
+    except Exception as e:
+        url = f"http://{ip}:{port}/"
+        print(f"mDNS not available: {e}")
+        print(f"Streaming server: {url}")
+
     def shutdown():
         print("\nShutting down...")
+        if zc is not None:
+            try:
+                from server.network import stop_mdns
+                stop_mdns(zc, mdns_info)
+            except Exception:
+                pass
         transcoder.stop_all()
 
     signal.signal(signal.SIGINT, lambda s, f: (shutdown(), sys.exit(0)))
@@ -66,8 +84,6 @@ def main():
     handler = make_handler(str(dir_path), transcoder, TEMP_DIR)
     server = ThreadingHTTPServer(("0.0.0.0", port), handler)
 
-    url = f"http://{ip}:{port}/"
-    print(f"Streaming server: {url}")
     print(f"Found {len(videos)} video(s):")
     for v in videos:
         sub = "CC" if v.has_subtitle else "  "

@@ -119,7 +119,11 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
                 if v.has_subtitle:
                     vtt_path = transcoder.get_temp_dir(video_id) / "subtitles.vtt"
                     if not vtt_path.exists():
-                        convert_srt_to_vtt(v.subtitle, str(vtt_path))
+                        print(f"[VTT] {video_id} pre-convert from playlist handler")
+                        try:
+                            convert_srt_to_vtt(v.subtitle, str(vtt_path))
+                        except Exception as e:
+                            print(f"[VTT] {video_id} pre-convert error: {e}")
 
             playlist_path = transcoder.get_temp_dir(video_id) / "playlist.m3u8"
             waited = 0
@@ -149,16 +153,25 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
             videos = self._scan()
             v = videos.get(video_id)
             if v is None:
+                print(f"[VTT] {video_id} video not found")
                 self._serve_404()
                 return
             if not v.has_subtitle:
+                print(f"[VTT] {video_id} no subtitle file")
                 self._serve_404()
                 return
             temp_dir = transcoder.get_temp_dir(video_id)
             vtt_path = temp_dir / "subtitles.vtt"
             if not vtt_path.exists():
-                convert_srt_to_vtt(v.subtitle, str(vtt_path))
+                print(f"[VTT] {video_id} converting {v.subtitle}")
+                try:
+                    convert_srt_to_vtt(v.subtitle, str(vtt_path))
+                except Exception as e:
+                    print(f"[VTT] {video_id} convert error: {e}")
+                    self._serve_404()
+                    return
             content = vtt_path.read_bytes()
+            print(f"[VTT] {video_id} OK ({len(content)} bytes)")
             self.send_response(200)
             self.send_header("Content-Type", "text/vtt; charset=utf-8")
             self.send_header("Content-Length", len(content))
