@@ -25,7 +25,9 @@ def scan_directory(dir_path: str) -> list[VideoEntry]:
 
     mp4_files = sorted(
         [f for f in files
-         if os.path.splitext(f)[1].lower() in _VIDEO_EXTS]
+         if os.path.splitext(f)[1].lower() in _VIDEO_EXTS],
+        key=lambda f: os.path.getmtime(os.path.join(dir_path, f)),
+        reverse=True,
     )
 
     entries = []

@@ -64,7 +64,7 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
         def _serve_index(self):
             videos = self._scan()
             items_html = ""
-            for video_id, v in sorted(videos.items(), key=lambda x: x[1].name):
+            for video_id, v in videos.items():
                 badge = _SUB_BADGE if v.has_subtitle else ""
                 items_html += _render(_INDEX_ITEM, id=video_id, name=html.escape(v.name), sub_badge=badge)
             html_content = _render(_INDEX_TPL, items=items_html)

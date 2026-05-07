@@ -47,6 +47,8 @@ class Transcoder:
                     crash_log_lines = self._read_log_tail(index)
                 else:
                     return
+            elif (self.temp_root / index / "playlist.m3u8").exists():
+                return
             temp_dir = self.get_temp_dir(index)
             self._clean_dir(temp_dir)
 
