@@ -26,6 +26,32 @@ video {
   position:absolute; top:0; left:0;
   background:#000; object-fit:contain;
 }
+#fs-btn {
+  position:absolute; bottom:60px; right:12px; z-index:10;
+  background:rgba(0,0,0,0.55); border:1px solid rgba(255,255,255,0.25);
+  color:#fff; width:38px; height:38px; border-radius:8px;
+  display:flex; align-items:center; justify-content:center;
+  cursor:pointer; padding:0;
+  -webkit-backdrop-filter:blur(4px); backdrop-filter:blur(4px);
+}
+#fs-btn svg { width:16px; height:16px; }
+#fs-exit-btn {
+  position:fixed; top:max(12px,env(safe-area-inset-top)); right:12px; z-index:10000;
+  background:rgba(0,0,0,0.55); border:1px solid rgba(255,255,255,0.25);
+  color:#fff; width:38px; height:38px; border-radius:50%;
+  font-size:18px; line-height:38px; text-align:center; cursor:pointer;
+  display:none; padding:0;
+  -webkit-backdrop-filter:blur(4px); backdrop-filter:blur(4px);
+}
+.custom-fullscreen #top-bar { display:none; }
+.custom-fullscreen #player-container {
+  position:fixed; z-index:9999; top:0; left:0;
+  width:100vh; height:100vw;
+  transform:rotate(90deg) translateY(-100%);
+  transform-origin:top left;
+}
+.custom-fullscreen #fs-btn { display:none; }
+.custom-fullscreen #fs-exit-btn { display:block; }
 </style>
 </head>
 <body>
@@ -34,6 +60,8 @@ video {
 </div>
 <div id="player-container">
   <video id="v" controls playsinline webkit-playsinline src="{{playlist_url}}">{{sub_track}}</video>
+  <button id="fs-btn" title="Fullscreen"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 5V2h3M14 11v3h-3M11 2h3v3M5 14H2v-3"/></svg></button>
+  <button id="fs-exit-btn" title="Exit fullscreen">&times;</button>
 </div>
 <script>
 var v=document.getElementById('v');
@@ -50,6 +78,22 @@ document.addEventListener('fullscreenchange',function(){ if(document.fullscreenE
 document.addEventListener('webkitfullscreenchange',function(){ if(document.webkitFullscreenElement)lockLandscape();else unlockOrientation(); });
 v.addEventListener('webkitbeginfullscreen',lockLandscape);
 v.addEventListener('webkitendfullscreen',unlockOrientation);
+
+var fsBtn=document.getElementById('fs-btn');
+var fsExitBtn=document.getElementById('fs-exit-btn');
+function enterFS(){
+  document.body.classList.add('custom-fullscreen');
+  try{screen.orientation.lock('landscape');}catch(e){}
+}
+function exitFS(){
+  document.body.classList.remove('custom-fullscreen');
+  try{screen.orientation.unlock();}catch(e){}
+}
+fsBtn.addEventListener('click',function(e){ e.stopPropagation(); enterFS(); });
+fsExitBtn.addEventListener('click',function(e){ e.stopPropagation(); exitFS(); });
+window.addEventListener('orientationchange',function(){
+  if(document.body.classList.contains('custom-fullscreen')) exitFS();
+});
 </script>
 </body>
 </html>
