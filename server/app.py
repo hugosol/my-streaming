@@ -80,8 +80,7 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
                 title=html.escape(v.name),
                 playlist_url=f"/stream/{video_id}/playlist.m3u8",
                 video_id=video_id,
-                sub_toggle_display="inline-block" if v.has_subtitle else "none",
-                sub_url=f"/stream/{video_id}/subtitles.vtt" if v.has_subtitle else "",
+                sub_track=f'<track kind="subtitles" src="/stream/{video_id}/subtitles.vtt" srclang="en" label="Subtitles" default>' if v.has_subtitle else "",
             )
             self._respond_html(html_content)
 

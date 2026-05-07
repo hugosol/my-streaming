@@ -18,11 +18,6 @@ body {
   background:#000;
 }
 #back-btn { color:#fff; font-size:16px; text-decoration:none; }
-#sub-toggle {
-  background:rgba(255,255,255,0.15); color:#fff; border:1px solid rgba(255,255,255,0.3);
-  border-radius:6px; padding:6px 14px; font-size:14px;
-  -webkit-appearance:none; appearance:none;
-}
 #player-container {
   flex:1; position:relative; min-height:0;
 }
@@ -31,24 +26,14 @@ video {
   position:absolute; top:0; left:0;
   background:#000; object-fit:contain;
 }
-#sub-overlay {
-  position:absolute; bottom:40px; left:0; right:0; text-align:center; z-index:10;
-  pointer-events:none; padding:6px 12px;
-}
-#sub-overlay span {
-  display:inline-block; background:rgba(0,0,0,0.75); color:#fff; font-size:16px;
-  padding:4px 12px; border-radius:4px; max-width:90vw; line-height:1.5;
-}
 </style>
 </head>
 <body>
 <div id="top-bar">
   <a id="back-btn" href="/">&larr; Back</a>
-  <button id="sub-toggle" style="display:{{sub_toggle_display}}" onclick="toggleSub()">CC</button>
 </div>
 <div id="player-container">
-  <video id="v" controls playsinline webkit-playsinline src="{{playlist_url}}"></video>
-  <div id="sub-overlay" style="display:none"><span></span></div>
+  <video id="v" controls playsinline webkit-playsinline src="{{playlist_url}}">{{sub_track}}</video>
 </div>
 <script>
 var v=document.getElementById('v');
@@ -65,18 +50,6 @@ document.addEventListener('fullscreenchange',function(){ if(document.fullscreenE
 document.addEventListener('webkitfullscreenchange',function(){ if(document.webkitFullscreenElement)lockLandscape();else unlockOrientation(); });
 v.addEventListener('webkitbeginfullscreen',lockLandscape);
 v.addEventListener('webkitendfullscreen',unlockOrientation);
-
-var cues=[],subVisible=false,subIdx=-1;
-
-function toggleSub(){ subVisible=!subVisible; var o=document.getElementById('sub-overlay'); o.style.display=subVisible?'block':'none'; }
-
-function parseVTT(t){ t=t.replace(/\r\n/g,'\n'); var blocks=t.split(/\n\n+/),r=[]; for(var i=0;i<blocks.length;i++){ var b=blocks[i].trim(); if(!b||b==='WEBVTT')continue; var lines=b.split('\n'),ts=-1; for(var j=0;j<lines.length;j++){ if(/^\d{2}:\d{2}:\d{2}\.\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}\.\d{3}/.test(lines[j])){ ts=j; break; } } if(ts<0)continue; var m=/^(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})\.(\d{3})/.exec(lines[ts]); if(!m)continue; var st=parseInt(m[1])*3600+parseInt(m[2])*60+parseInt(m[3])+parseInt(m[4])/1000; var et=parseInt(m[5])*3600+parseInt(m[6])*60+parseInt(m[7])+parseInt(m[8])/1000; var txt=lines.slice(ts+1).map(function(l){return l.replace(/<[^>]*>/g,'');}).join('<br>'); r.push({s:st,e:et,text:txt}); } return r; }
-
-function updateSub(){ if(!subVisible||!cues.length){ document.getElementById('sub-overlay').querySelector('span').innerHTML=''; return; } var ct=v.currentTime; if(subIdx>=0&&ct>=cues[subIdx].s&&ct<=cues[subIdx].e)return; for(var i=0;i<cues.length;i++){ if(ct>=cues[i].s&&ct<=cues[i].e){ subIdx=i; document.getElementById('sub-overlay').querySelector('span').innerHTML=cues[i].text; return; } } subIdx=-1; document.getElementById('sub-overlay').querySelector('span').innerHTML=''; }
-
-fetch('{{sub_url}}').then(function(r){return r.text();}).then(function(t){ cues=parseVTT(t); });
-
-setInterval(updateSub,200);
 </script>
 </body>
 </html>
