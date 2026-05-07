@@ -10,16 +10,16 @@ from pathlib import Path
 class Transcoder:
     def __init__(self, temp_root: Path):
         self.temp_root = temp_root
-        self._processes: dict[int, subprocess.Popen] = {}
+        self._processes: dict[str, subprocess.Popen] = {}
         self._lock = threading.RLock()
 
-    def get_temp_dir(self, index: int) -> Path:
-        d = self.temp_root / str(index)
+    def get_temp_dir(self, index: str) -> Path:
+        d = self.temp_root / index
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def _read_log_tail(self, index: int, n: int = 15):
-        log_path = self.temp_root / str(index) / "ffmpeg.log"
+    def _read_log_tail(self, index: str, n: int = 15):
+        log_path = self.temp_root / index / "ffmpeg.log"
         if not log_path.exists():
             return []
         try:
@@ -29,12 +29,12 @@ class Transcoder:
         except OSError:
             return []
 
-    def is_running(self, index: int) -> bool:
+    def is_running(self, index: str) -> bool:
         with self._lock:
             proc = self._processes.get(index)
             return proc is not None and proc.poll() is None
 
-    def start(self, index: int, video_path: str):
+    def start(self, index: str, video_path: str):
         exit_code = None
         crash_log_lines = None
         with self._lock:
@@ -83,7 +83,7 @@ class Transcoder:
         if crash_log_lines:
             _print_crash(index, exit_code, crash_log_lines)
 
-    def stop(self, index: int):
+    def stop(self, index: str):
         with self._lock:
             proc = self._processes.pop(index, None)
         if proc:
@@ -100,6 +100,21 @@ class Transcoder:
         for index in indices:
             self.stop(index)
 
+    def cleanup_expired(self, max_age_seconds: float = 86400):
+        now = time.time()
+        if not self.temp_root.exists():
+            return
+        for item in self.temp_root.iterdir():
+            try:
+                if item.is_dir():
+                    if now - item.stat().st_mtime > max_age_seconds:
+                        shutil.rmtree(item)
+                elif item.is_file():
+                    if now - item.stat().st_mtime > max_age_seconds:
+                        item.unlink()
+            except OSError:
+                pass
+
     def _clean_dir(self, d: Path):
         if not d.exists():
             return
@@ -110,7 +125,7 @@ class Transcoder:
                 shutil.rmtree(item)
 
 
-def _print_crash(index: int, exit_code: int, log_lines):
+def _print_crash(index: str, exit_code: int, log_lines):
     print(f"\n[!] FFmpeg exited with code {exit_code} for video #{index} -- restarting...")
     for line in log_lines:
         print(f"    {line.rstrip()}")

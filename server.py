@@ -1,6 +1,4 @@
 import argparse
-import atexit
-import shutil
 import signal
 import sys
 from http.server import HTTPServer
@@ -20,11 +18,6 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 
 
 TEMP_DIR = Path.cwd() / "temp"
-
-
-def _cleanup_temp():
-    if TEMP_DIR.exists():
-        shutil.rmtree(TEMP_DIR, ignore_errors=True)
 
 
 def _print_qr(url):
@@ -54,28 +47,23 @@ def main():
         sys.exit(1)
 
     videos = scan_directory(str(dir_path))
-    if not videos:
-        print(f"No .mp4 files found in '{args.directory}'")
-        sys.exit(1)
 
     ip = get_lan_ip()
     port = find_free_port()
 
-    _cleanup_temp()
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    atexit.register(_cleanup_temp)
 
     transcoder = Transcoder(TEMP_DIR)
+    transcoder.cleanup_expired()
 
     def shutdown():
         print("\nShutting down...")
         transcoder.stop_all()
-        _cleanup_temp()
 
     signal.signal(signal.SIGINT, lambda s, f: (shutdown(), sys.exit(0)))
     signal.signal(signal.SIGTERM, lambda s, f: (shutdown(), sys.exit(0)))
 
-    handler = make_handler(videos, transcoder, TEMP_DIR)
+    handler = make_handler(str(dir_path), transcoder, TEMP_DIR)
     server = ThreadingHTTPServer(("0.0.0.0", port), handler)
 
     url = f"http://{ip}:{port}/"

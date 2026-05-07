@@ -1,9 +1,11 @@
+import hashlib
 import os
 from dataclasses import dataclass, field
 
 
 @dataclass
 class VideoEntry:
+    id: str
     path: str
     name: str
     subtitle: str | None = None
@@ -31,7 +33,9 @@ def scan_directory(dir_path: str) -> list[VideoEntry]:
         full_path = os.path.join(dir_path, mp4_file)
         base_name = os.path.splitext(mp4_file)[0]
         subtitle = _find_subtitle(files, base_name, dir_path)
+        video_id = hashlib.md5(mp4_file.encode()).hexdigest()[:8]
         entries.append(VideoEntry(
+            id=video_id,
             path=full_path,
             name=mp4_file,
             subtitle=subtitle,
