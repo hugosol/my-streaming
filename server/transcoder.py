@@ -63,7 +63,7 @@ class Transcoder:
                 "-c:v", "h264_nvenc", "-cq", "23", "-preset", "p4",
                 "-c:a", "copy",
                 "-f", "hls",
-                "-hls_time", "4",
+                "-hls_time", "10",
                 "-hls_list_size", "0",
                 "-hls_segment_filename", str(segment_pattern),
                 str(playlist),
