@@ -103,7 +103,7 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
                 title=html.escape(v.name),
                 playlist_url=f"/stream/{video_id}/playlist.m3u8",
                 video_id=video_id,
-                sub_track=f'<track kind="subtitles" src="/stream/{video_id}/subtitles.vtt" srclang="en" label="Subtitles" default>' if v.has_subtitle else "",
+                subtitle_url=f"/stream/{video_id}/subtitles.vtt" if v.has_subtitle else "",
             )
             self._respond_html(html_content)
 
@@ -234,6 +234,7 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", len(data))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(data)
 

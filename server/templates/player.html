@@ -11,7 +11,7 @@
   <a id="back-btn" href="/">&larr; Back</a>
 </div>
 <div id="player-container">
-  <video id="v" controls playsinline webkit-playsinline src="{{playlist_url}}" data-video-id="{{video_id}}">{{sub_track}}</video>
+  <video id="v" controls playsinline webkit-playsinline data-playlist-url="{{playlist_url}}" data-video-id="{{video_id}}" data-subtitle-url="{{subtitle_url}}"></video>
   <button id="fs-btn" title="Fullscreen"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 5V2h3M14 11v3h-3M11 2h3v3M5 14H2v-3"/></svg></button>
   <button id="fs-exit-btn" title="Exit fullscreen">&times;</button>
 </div>

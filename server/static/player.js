@@ -1,7 +1,32 @@
 var v = document.getElementById('v');
+var trackEl = null;
+var subUrl = v.dataset.subtitleUrl;
+if (subUrl) {
+  v.querySelectorAll('track').forEach(function(t) { t.remove(); });
+  trackEl = document.createElement('track');
+  trackEl.kind = 'subtitles';
+  trackEl.src = subUrl + '?v=' + Date.now();
+  trackEl.srclang = 'en';
+  trackEl.label = 'Subtitles';
+  trackEl.default = true;
+  v.appendChild(trackEl);
+}
+v.src = v.dataset.playlistUrl + '?v=' + Date.now();
+if (trackEl) {
+  v.addEventListener('loadedmetadata', function() {
+    trackEl.track.mode = 'showing';
+  });
+}
 var k = 'ms-pos-' + v.dataset.videoId;
-var t = parseFloat(localStorage.getItem(k) || 0);
-if (t > 1) v.currentTime = t;
+var pendingSeek = parseFloat(localStorage.getItem(k) || 0);
+if (pendingSeek > 1) {
+  v.addEventListener('play', function() {
+    if (v.duration > 0 && pendingSeek > 0) {
+      v.currentTime = Math.min(pendingSeek, v.duration - 0.5);
+      pendingSeek = 0;
+    }
+  });
+}
 setInterval(function() { try { if (v.currentTime > 0) localStorage.setItem(k, v.currentTime); } catch(e) {} }, 5000);
 v.addEventListener('pause', function() { try { localStorage.setItem(k, v.currentTime); } catch(e) {} });
 var snapBusy = false;
