@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+temp/
+*.mp4
+*.srt
+.idea/
