@@ -22,6 +22,26 @@ _SUB_BADGE = ' <span class="sub-badge">CC</span>'
 _SEGMENT_RE = re.compile(r"^/stream/([a-f0-9]+)/segment_\d+\.ts$")
 _PLAYLIST_RE = re.compile(r"^/stream/([a-f0-9]+)/playlist\.m3u8$")
 _VTT_RE = re.compile(r"^/stream/([a-f0-9]+)/subtitles\.vtt$")
+_EXTINF_RE = re.compile(r"#EXTINF:([\d.]+),\s*\n(segment_\d+\.ts)")
+
+
+def _merge_playlists(static_path: Path, ffmpeg_path: Path) -> str:
+    static_text = static_path.read_text(encoding="utf-8")
+    static_pairs = _EXTINF_RE.findall(static_text)
+
+    ffmpeg_durations: dict[str, float] = {}
+    if ffmpeg_path.exists():
+        ffmpeg_text = ffmpeg_path.read_text(encoding="utf-8")
+        for dur_str, name in _EXTINF_RE.findall(ffmpeg_text):
+            ffmpeg_durations[name] = float(dur_str)
+
+    lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:10", "#EXT-X-PLAYLIST-TYPE:VOD"]
+    for dur_str, name in static_pairs:
+        dur = ffmpeg_durations.get(name, float(dur_str))
+        lines.append(f"#EXTINF:{dur:.6f},")
+        lines.append(name)
+    lines.append("#EXT-X-ENDLIST")
+    return "\n".join(lines) + "\n"
 
 
 def _render(template: str, **kwargs) -> str:
@@ -111,7 +131,13 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
                 self._serve_404()
                 return
 
-            content = playlist_path.read_bytes()
+            temp_dir = transcoder.get_temp_dir(video_id)
+            ffmpeg_path = temp_dir / "_ffmpeg.m3u8"
+            if ffmpeg_path.exists():
+                content = _merge_playlists(playlist_path, ffmpeg_path).encode("utf-8")
+            else:
+                content = playlist_path.read_bytes()
+
             self.send_response(200)
             self.send_header("Content-Type", "application/vnd.apple.mpegurl")
             self.send_header("Content-Length", len(content))
