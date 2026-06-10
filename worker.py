@@ -73,12 +73,18 @@ def _get_conn() -> sqlite3.Connection:
         _conn = sqlite3.connect(str(dbp), check_same_thread=False)
         _conn.execute("PRAGMA journal_mode=WAL")
         _conn.execute("PRAGMA busy_timeout=5000")
+        # Check if old schema needs migration (no stage column)
+        cols = [row[1] for row in _conn.execute("PRAGMA table_info(jobs)").fetchall()]
+        if cols and "stage" not in cols:
+            _conn.execute("DROP TABLE jobs")
+            _conn.commit()
         _conn.execute("""
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
                 url TEXT NOT NULL,
                 video_id TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
+                stage TEXT NOT NULL DEFAULT 'pending',
+                status TEXT NOT NULL DEFAULT 'in_progress',
                 progress TEXT DEFAULT '',
                 video_name TEXT DEFAULT '',
                 error TEXT DEFAULT '',
@@ -120,7 +126,7 @@ def _extract_video_id(url: str) -> str:
 def _find_duplicate(video_id: str) -> dict | None:
     conn = _get_conn()
     row = conn.execute(
-        "SELECT * FROM jobs WHERE video_id = ? AND status NOT IN ('done', 'failed')",
+        "SELECT * FROM jobs WHERE video_id = ? AND status = 'in_progress'",
         (video_id,),
     ).fetchone()
     if row is None:
@@ -128,15 +134,14 @@ def _find_duplicate(video_id: str) -> dict | None:
     cols = [desc[0] for desc in conn.execute("SELECT * FROM jobs LIMIT 0").description]
     return dict(zip(cols, row))
 
-
 def _create_job(url: str, video_id: str) -> str:
     job_id = uuid.uuid4().hex[:12]
     now = _now_iso()
     with _conn_lock:
         conn = _get_conn()
         conn.execute(
-            "INSERT INTO jobs (id, url, video_id, status, progress, video_name, error, created_at, updated_at) "
-            "VALUES (?, ?, ?, 'pending', '', '', '', ?, ?)",
+            "INSERT INTO jobs (id, url, video_id, stage, status, progress, video_name, error, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'pending', 'in_progress', '', '', '', ?, ?)",
             (job_id, url, video_id, now, now),
         )
         conn.commit()
@@ -144,13 +149,13 @@ def _create_job(url: str, video_id: str) -> str:
 
 
 def _mark_interrupted() -> None:
-    """On startup, mark all non-terminal jobs as failed."""
+    """On startup, mark all in_progress jobs as failed."""
     now = _now_iso()
     with _conn_lock:
         conn = _get_conn()
         conn.execute(
             "UPDATE jobs SET status = 'failed', error = 'Worker restarted', updated_at = ? "
-            "WHERE status NOT IN ('done', 'failed')",
+            "WHERE status = 'in_progress'",
             (now,),
         )
         conn.commit()
@@ -183,8 +188,10 @@ def _run_subprocess(cmd: list[str], cwd: Path, label: str, on_line: object = Non
     return proc.returncode
 
 
-def _run_punctuate_chunk(chunk_path: Path, output_path: Path) -> bool:
-    """Call DeepSeek API to add punctuation to one chunk."""
+def _run_punctuate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
+    """Call DeepSeek API to add punctuation to one chunk.
+    Returns (True, "") on success, (False, error_reason) on failure.
+    """
     try:
         chunk_text = chunk_path.read_text(encoding="utf-8")
         from worker.skill_caller import call_skill
@@ -197,189 +204,320 @@ def _run_punctuate_chunk(chunk_path: Path, output_path: Path) -> bool:
         )
         if result:
             output_path.write_text(result, encoding="utf-8")
-            return True
+            return True, ""
+        return False, "Empty response from API"
     except Exception as e:
         print(f"[PUNCTUATE] Chunk {chunk_path.name} failed: {e}")
-    return False
+        return False, str(e)
 
 
 def _execute_pipeline(job_id: str, url: str) -> None:
-    """Execute the full download->translate pipeline in a background thread."""
-    video_dir = _video_dir()
+    """Execute the full pipeline in a background thread (thin orchestrator)."""
     job_dir = _ROOT / "jobs" / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Step 1: Download
-        _update_job(job_id, status="downloading", progress="")
-        download_script = _SCRIPTS_DIR / "download.ps1"
-        proxy = _load_config().get("yt_download_proxy", "")
-        download_cmd = [
-            "powershell.exe", "-ExecutionPolicy", "Bypass", "-File", str(download_script),
-            "-Url", url,
-            "-OutputDir", str(job_dir),
-        ]
-        if proxy:
-            download_cmd.extend(["-Proxy", proxy])
-        
-        rc = _run_subprocess(download_cmd, job_dir, "DOWNLOAD")
-        if rc != 0:
-            _update_job(job_id, status="failed", error=f"下载失败 (exit code {rc})")
+        srt_path = _do_download(job_id, url)
+        if srt_path is None:
             return
 
-        # Find English SRT
-        srt_files = sorted(job_dir.glob("*.en.srt"))
-        if not srt_files:
-            # Try any SRT
-            srt_files = sorted(job_dir.glob("*.srt"))
-        if not srt_files:
-            mp4_files = sorted(job_dir.glob("*.mp4"))
-            vname = mp4_files[0].stem if mp4_files else ""
-            _update_job(job_id, status="done", progress="", video_name=vname)
-            for mp4 in mp4_files:
-                mp4.replace(video_dir / mp4.name)
+        if not _do_punctuate(job_id, srt_path):
             return
-
-        srt_path = srt_files[0]
-
-        # Set video_name from downloaded MP4
-        mp4_files = sorted(job_dir.glob("*.mp4"))
-        if mp4_files:
-            _update_job(job_id, video_name=mp4_files[0].stem)
-
-        # Step 2: Punctuate
-        _update_job(job_id, status="punctuating", progress="")
-        
-        # Check if punctuation is needed
-        text = srt_path.read_text(encoding="utf-8")
-        lines = [l for l in text.split("\n") if l.strip() and not l.strip().isdigit() 
-                 and "-->" not in l]
-        if lines:
-            punct_count = sum(1 for l in lines for c in l if c in ".?!,;:")
-            expected = len(lines) * _load_config().get("punctuation_check", {}).get("expected_per_lines", 0.333)
-            threshold = expected * _load_config().get("punctuation_check", {}).get("threshold_factor", 0.4)
-            needs_punct = punct_count < threshold
-        else:
-            needs_punct = False
-
-        if needs_punct:
-            srt_marker = _SKILLS_DIR / "srt-punctuator" / "scripts" / "srt_marker.py"
-            
-            # Prepare chunks
-            rc = _run_subprocess(
-                [sys.executable, str(srt_marker), "prepare", str(srt_path)],
-                job_dir, "PUNCT-PREPARE",
-            )
-            if rc != 0:
-                _update_job(job_id, status="failed", error="标点准备失败")
-                return
-
-            # Process chunks via DeepSeek API
-            chunks_json = srt_path.parent / f"{srt_path.stem}.punc_work" / "chunks.json"
-            if chunks_json.exists():
-                chunks_data = json.loads(chunks_json.read_text())
-                total_chunks = chunks_data.get("total_chunks", 0)
-                chunks_dir = chunks_json.parent / "chunks"
-                
-                for i in range(total_chunks):
-                    chunk_file = chunks_dir / f"chunk_{i:03d}.txt"
-                    output_file = chunks_dir / f"chunk_{i:03d}_punctuated.txt"
-                    if not chunk_file.exists():
-                        _update_job(job_id, status="failed", error=f"缺少chunk文件: {chunk_file.name}")
-                        return
-                    
-                    _update_job(job_id, progress=f"{i + 1}/{total_chunks}")
-                    if not _run_punctuate_chunk(chunk_file, output_file):
-                        _update_job(job_id, status="failed", error=f"标点处理失败 (chunk {i + 1}/{total_chunks})")
-                        return
-            else:
-                _update_job(job_id, status="failed", error="chunks.json not found after prepare")
-                return
-
-            # Finalize
-            punc_work_dir = srt_path.parent / f"{srt_path.stem}.punc_work"
-            rc = _run_subprocess(
-                [sys.executable, str(srt_marker), "finalize", str(srt_path), str(punc_work_dir), "--from-chunks"],
-                job_dir, "PUNCT-FINALIZE",
-            )
-            if rc != 0:
-                _update_job(job_id, status="failed", error="标点合并失败")
-                return
-            
-            _update_job(job_id, progress="")
-        else:
-            _update_job(job_id, progress="")
-
-        # Step 3: Resegment
-        _update_job(job_id, status="resegmenting", progress="")
-        resegment_script = _SCRIPTS_DIR / "resegment.py"
-        rc = _run_subprocess(
-            [sys.executable, str(resegment_script), str(srt_path)],
-            job_dir, "RESEGMENT",
-        )
-        if rc != 0:
-            _update_job(job_id, status="failed", error="重新分句失败")
+        if not _do_resegment(job_id, srt_path):
             return
-
-        # Step 4: Translate
-        _update_job(job_id, status="translating", progress="")
-        batch_script = _SCRIPTS_DIR / "batch_translate.py"
-        db_path = str(_db_path())
-        rc = _run_subprocess(
-            [sys.executable, str(batch_script), str(srt_path),
-             "--job-id", job_id, "--db-path", db_path],
-            job_dir, "TRANSLATE",
-        )
-        if rc != 0:
-            _update_job(job_id, status="failed", error="翻译失败")
+        if not _do_translate(job_id, srt_path):
             return
-
-        # Step 5: Finalize
-        _update_job(job_id, status="finalizing", progress="")
-        finalize_script = _SCRIPTS_DIR / "finalize-subtitles.ps1"
-        workspace_dir = job_dir / f"{srt_path.stem}_workspace"
-        rc = _run_subprocess(
-            ["powershell.exe", "-ExecutionPolicy", "Bypass", "-File", str(finalize_script),
-             "-InputFile", str(srt_path),
-             "-WorkspaceDir", str(workspace_dir)],
-            job_dir, "FINALIZE",
-        )
-        if rc != 0:
-            print(f"[FINALIZE] Warning: exit code {rc} (non-fatal)")
-        # Move final files to video directory
-        for mp4 in job_dir.glob("*.mp4"):
-            dest = video_dir / mp4.name
-            if not dest.exists():
-                mp4.replace(dest)
-        
-        # Move SRT files (bilingual + original backup)
-        for srt in job_dir.glob("*.srt"):
-            dest = video_dir / srt.name
-            srt.replace(dest)  # overwrite if exists
-
-        video_name = ""
-        mp4_files = sorted(video_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if mp4_files:
-            video_name = mp4_files[0].name
-
-        _update_job(job_id, status="done", progress="", video_name=video_name)
-
-        # Clean up job directory
-        shutil.rmtree(job_dir, ignore_errors=True)
-
+        if not _do_finalize(job_id, srt_path):
+            return
     except Exception as e:
         traceback.print_exc()
         _update_job(job_id, status="failed", error=str(e))
         print(f"[PIPELINE] Unexpected error in job {job_id}: {e}")
 
 
-# --- HTTP Server ---
+def _do_download(job_id: str, url: str) -> Path | None:
+    """Download video + SRT. Returns srt_path on success, None on failure/no-SRT."""
+    video_dir = _video_dir()
+    job_dir = _ROOT / "jobs" / job_id
+    _update_job(job_id, stage="downloading", progress="")
+
+    download_script = _SCRIPTS_DIR / "download.ps1"
+    proxy = _load_config().get("yt_download_proxy", "")
+    download_cmd = [
+        "powershell.exe", "-ExecutionPolicy", "Bypass", "-File", str(download_script),
+        "-Url", url,
+        "-OutputDir", str(job_dir),
+    ]
+    if proxy:
+        download_cmd.extend(["-Proxy", proxy])
+
+    rc = _run_subprocess(download_cmd, job_dir, "DOWNLOAD")
+    if rc != 0:
+        _update_job(job_id, status="failed", error=f"下载失败 (exit code {rc})")
+        return None
+
+    srt_files = sorted(job_dir.glob("*.en.srt"))
+    if not srt_files:
+        srt_files = sorted(job_dir.glob("*.srt"))
+    if not srt_files:
+        mp4_files = sorted(job_dir.glob("*.mp4"))
+        vname = mp4_files[0].stem if mp4_files else ""
+        _update_job(job_id, stage="done", status="success", progress="", video_name=vname)
+        for mp4 in mp4_files:
+            mp4.replace(video_dir / mp4.name)
+        return None
+
+    mp4_files = sorted(job_dir.glob("*.mp4"))
+    if mp4_files:
+        _update_job(job_id, video_name=mp4_files[0].stem)
+
+    return srt_files[0]
+
+
+def _do_punctuate(job_id: str, srt_path: Path) -> bool:
+    """Punctuation check and DeepSeek chunk processing. Returns True on success."""
+    _update_job(job_id, stage="punctuating", progress="")
+
+    text = srt_path.read_text(encoding="utf-8")
+    lines = [l for l in text.split("\n") if l.strip() and not l.strip().isdigit()
+             and "-->" not in l]
+    if lines:
+        punct_count = sum(1 for l in lines for c in l if c in ".?!,;:")
+        expected = len(lines) * _load_config().get("punctuation_check", {}).get("expected_per_lines", 0.333)
+        threshold = expected * _load_config().get("punctuation_check", {}).get("threshold_factor", 0.4)
+        needs_punct = punct_count < threshold
+    else:
+        needs_punct = False
+
+    if not needs_punct:
+        _update_job(job_id, progress="")
+        return True
+
+    srt_marker = _SKILLS_DIR / "srt-punctuator" / "scripts" / "srt_marker.py"
+    job_dir = srt_path.parent
+
+    rc = _run_subprocess(
+        [sys.executable, str(srt_marker), "prepare", str(srt_path)],
+        job_dir, "PUNCT-PREPARE",
+    )
+    if rc != 0:
+        _update_job(job_id, status="failed", error="标点准备失败")
+        return False
+
+    chunks_json = job_dir / f"{srt_path.stem}.punc_work" / "chunks.json"
+    if not chunks_json.exists():
+        _update_job(job_id, status="failed", error="chunks.json not found after prepare")
+        return False
+
+    chunks_data = json.loads(chunks_json.read_text())
+    total_chunks = chunks_data.get("total_chunks", 0)
+    chunks_dir = chunks_json.parent / "chunks"
+
+    for i in range(total_chunks):
+        chunk_file = chunks_dir / f"chunk_{i:03d}.txt"
+        output_file = chunks_dir / f"chunk_{i:03d}_punctuated.txt"
+        if not chunk_file.exists():
+            _update_job(job_id, status="failed", error=f"缺少chunk文件: {chunk_file.name}")
+            return False
+        _update_job(job_id, progress=f"{i + 1}/{total_chunks}")
+        ok, err_msg = _run_punctuate_chunk(chunk_file, output_file)
+        if not ok:
+            _update_job(job_id, status="failed", error=f"标点处理失败 (chunk {i + 1}/{total_chunks}): {err_msg}")
+            return False
+
+    punc_work_dir = job_dir / f"{srt_path.stem}.punc_work"
+    rc = _run_subprocess(
+        [sys.executable, str(srt_marker), "finalize", str(srt_path), str(punc_work_dir), "--from-chunks"],
+        job_dir, "PUNCT-FINALIZE",
+    )
+    if rc != 0:
+        _update_job(job_id, status="failed", error="标点合并失败")
+        return False
+
+    _update_job(job_id, progress="")
+    return True
+
+
+def _do_resegment(job_id: str, srt_path: Path) -> bool:
+    """Re-segment the SRT. Returns True on success."""
+    _update_job(job_id, stage="resegmenting", progress="")
+    resegment_script = _SCRIPTS_DIR / "resegment.py"
+    rc = _run_subprocess(
+        [sys.executable, str(resegment_script), str(srt_path)],
+        srt_path.parent, "RESEGMENT",
+    )
+    if rc != 0:
+        _update_job(job_id, status="failed", error="重新分句失败")
+        return False
+    return True
+
+
+def _do_translate(job_id: str, srt_path: Path) -> bool:
+    """Run batch translation. Returns True on success."""
+    _update_job(job_id, stage="translating", progress="")
+    batch_script = _SCRIPTS_DIR / "batch_translate.py"
+    db_path = str(_db_path())
+    rc = _run_subprocess(
+        [sys.executable, str(batch_script), str(srt_path),
+         "--job-id", job_id, "--db-path", db_path],
+        srt_path.parent, "TRANSLATE",
+    )
+    if rc != 0:
+        _update_job(job_id, status="failed", error="翻译失败")
+        return False
+    return True
+
+
+def _do_finalize(job_id: str, srt_path: Path) -> bool:
+    """Aggregate, combine, finalize, move files, clean up. Returns True on success."""
+    video_dir = _video_dir()
+    job_dir = srt_path.parent
+    _update_job(job_id, stage="finalizing", progress="")
+
+    finalize_script = _SCRIPTS_DIR / "finalize-subtitles.ps1"
+    workspace_dir = job_dir / f"{srt_path.stem}_workspace"
+    rc = _run_subprocess(
+        ["powershell.exe", "-ExecutionPolicy", "Bypass", "-File", str(finalize_script),
+         "-InputFile", str(srt_path),
+         "-WorkspaceDir", str(workspace_dir)],
+        job_dir, "FINALIZE",
+    )
+    if rc != 0:
+        print(f"[FINALIZE] Warning: exit code {rc} (non-fatal)")
+
+    for mp4 in job_dir.glob("*.mp4"):
+        dest = video_dir / mp4.name
+        if not dest.exists():
+            mp4.replace(dest)
+
+    for srt in job_dir.glob("*.srt"):
+        dest = video_dir / srt.name
+        srt.replace(dest)
+
+    video_name = ""
+    mp4_files = sorted(video_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if mp4_files:
+        video_name = mp4_files[0].name
+
+    _update_job(job_id, stage="done", status="success", progress="", video_name=video_name)
+    shutil.rmtree(job_dir, ignore_errors=True)
+    return True
+
+
+def _do_retry(job_id: str) -> None:
+    """Retry failed chunks of a translating-stage job, then re-finalize."""
+    try:
+        job = _get_job(job_id)
+        if not job:
+            return
+
+        # 1. Read progress A/B
+        progress = job.get("progress", "")
+        if "/" not in progress:
+            _update_job(job_id, status="failed", error="retry: invalid progress format")
+            return
+        a_str, b_str = progress.split("/", 1)
+        A = int(a_str)
+        B = int(b_str)
+
+        if A >= B:
+            _update_job(job_id, status="failed", error=f"retry: A({A}) >= B({B})")
+            return
+
+        # Find srt_path from job directory (exclude backup files)
+        job_dir = _ROOT / "jobs" / job_id
+        srt_files = sorted(job_dir.glob("*.srt"))
+        srt_files = [f for f in srt_files if "-bak" not in f.stem]
+        if not srt_files:
+            _update_job(job_id, status="failed", error="retry: SRT file not found")
+            return
+        srt_path = srt_files[0]
+
+        workspace_dir = job_dir / f"{srt_path.stem}_workspace"
+        chunks_dir = workspace_dir / "chunks"
+        if not chunks_dir.exists():
+            _update_job(job_id, status="failed", error="retry: chunks directory not found")
+            return
+
+        # 2. Count chunk files -> B_actual (exclude _chinese.txt output files)
+        chunk_files = sorted(chunks_dir.glob("chunk_*.txt"))
+        chunk_files = [f for f in chunk_files if "_chinese" not in f.stem]
+        B_actual = len(chunk_files)
+        if B != B_actual:
+            _update_job(job_id, status="failed",
+                        error=f"retry: B mismatch (DB={B}, actual={B_actual})")
+            return
+
+        # 3. Count successful chunks (chinese.txt exists + line count matches)
+        A_actual = 0
+        failed_indices = []
+        for cf in chunk_files:
+            chinese = chunks_dir / f"{cf.stem}_chinese.txt"
+            if chinese.exists():
+                try:
+                    src_lines = len([l for l in cf.read_text(encoding="utf-8").split("\n") if l.strip()])
+                    out_lines = len([l for l in chinese.read_text(encoding="utf-8").split("\n") if l.strip()])
+                    if src_lines == out_lines:
+                        A_actual += 1
+                        continue
+                except Exception:
+                    pass
+            failed_indices.append(cf)
+
+        if A != A_actual:
+            _update_job(job_id, status="failed",
+                        error=f"retry: A mismatch (DB={A}, actual={A_actual})")
+            return
+
+        # 4. Delete failed _chinese.txt files
+        for cf in failed_indices:
+            chinese = chunks_dir / f"{cf.stem}_chinese.txt"
+            if chinese.exists():
+                chinese.unlink()
+
+        # 5. Serially retranslate failed chunks
+        from worker.translate import translate_chunk
+        for cf in failed_indices:
+            chinese = chunks_dir / f"{cf.stem}_chinese.txt"
+            ok, err_msg = translate_chunk(cf, chinese)
+            if not ok:
+                _update_job(job_id, status="failed",
+                            error=f"retry: chunk {cf.name} failed: {err_msg}")
+                return
+            A += 1
+            _update_job(job_id, progress=f"{A}/{B}")
+
+        # 6. Re-finalize
+        if not _do_finalize(job_id, srt_path):
+            return
+
+    except Exception as e:
+        traceback.print_exc()
+        _update_job(job_id, status="failed", error=f"retry error: {e}")
+
+
+ # --- HTTP Server ---
+
+_DELETE_JOB_RE = re.compile(r"^/job/([a-f0-9]+)/delete$")
+_RETRY_JOB_RE = re.compile(r"^/job/([a-f0-9]+)/retry$")
+
 
 class WorkerHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # suppress default logging
 
     def do_POST(self):
+        # Route: DELETE job
+        if m := _DELETE_JOB_RE.match(self.path):
+            self._handle_delete(m.group(1))
+            return
+
+        # Route: RETRY job
+        if m := _RETRY_JOB_RE.match(self.path):
+            self._handle_retry(m.group(1))
+            return
+
+        # Route: create job
         if self.path != "/job":
             self._respond(404, {"error": "not found"})
             return
@@ -424,6 +562,69 @@ class WorkerHandler(BaseHTTPRequestHandler):
         thread.start()
 
         self._respond(201, {"job_id": job_id})
+
+    def _handle_delete(self, job_id: str) -> None:
+        """POST /job/<job_id>/delete — delete a failed job."""
+        job = _get_job(job_id)
+        if job is None:
+            self._respond(404, {"error": "job not found"})
+            return
+
+        # Atomically claim the job: only proceed if status is 'failed'
+        with _conn_lock:
+            conn = _get_conn()
+            cur = conn.execute(
+                "UPDATE jobs SET status = 'in_progress' WHERE id = ? AND status = 'failed'",
+                (job_id,),
+            )
+            conn.commit()
+            if cur.rowcount == 0:
+                self._respond(409, {"error": "job is not in failed state"})
+                return
+
+        # Delete DB row
+        with _conn_lock:
+            conn = _get_conn()
+            conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+            conn.commit()
+
+        # Delete job directory
+        job_dir = _ROOT / "jobs" / job_id
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+        self._respond(200, {"job_id": job_id, "deleted": True})
+
+    def _handle_retry(self, job_id: str) -> None:
+        """POST /job/<job_id>/retry — retry failed translation chunks."""
+        job = _get_job(job_id)
+        if job is None:
+            self._respond(404, {"error": "job not found"})
+            return
+
+        if job["stage"] != "translating":
+            self._respond(400, {"error": "retry only supported for translating stage"})
+            return
+
+        if job["status"] != "failed":
+            self._respond(409, {"error": "job is not in failed state"})
+            return
+
+        # Atomically claim
+        with _conn_lock:
+            conn = _get_conn()
+            cur = conn.execute(
+                "UPDATE jobs SET status = 'in_progress' WHERE id = ? AND status = 'failed'",
+                (job_id,),
+            )
+            conn.commit()
+            if cur.rowcount == 0:
+                self._respond(409, {"error": "job is already being retried"})
+                return
+
+        # Start retry in background
+        thread = threading.Thread(target=_do_retry, args=(job_id,), daemon=True)
+        thread.start()
+        self._respond(200, {"job_id": job_id, "status": "retrying"})
 
     def _respond(self, status: int, data: dict) -> None:
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")

@@ -98,11 +98,15 @@ def call_skill(
 
     client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
-    response = client.chat.completions.create(
-        model=_get_model(),
-        messages=[{"role": "user", "content": full_content}],
-        max_tokens=max_tokens,
-        extra_body={"thinking": {"type": "enabled"}},
-        reasoning_effort=_get_reasoning_effort(),  # type: ignore[arg-type]
-    )
+    model = _get_model()
+    kwargs: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": full_content}],
+        "max_tokens": max_tokens,
+    }
+    if model == "deepseek-reasoner":
+        kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        kwargs["reasoning_effort"] = _get_reasoning_effort()
+
+    response = client.chat.completions.create(**kwargs)
     return response.choices[0].message.content or ""

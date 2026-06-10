@@ -10,10 +10,10 @@ import json
 import re
 import shutil
 import sqlite3
-import subprocess
 import sys
 import time
 import logging
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
@@ -23,7 +23,9 @@ MAX_LOOKAHEAD = 30
 MIN_SIZE = 30
 MAX_SIZE = 100
 SCRIPT_DIR = Path(__file__).resolve().parent
-RUN_OPENCODE = SCRIPT_DIR / "run_deepseek.py"
+_WORKER_DIR = SCRIPT_DIR.parent
+sys.path.insert(0, str(_WORKER_DIR.parent))
+from worker.translate import translate_chunk
 EXTRACT_SCRIPT = SCRIPT_DIR / "extract-subtitle-text.ps1"
 COMBINE_SCRIPT = SCRIPT_DIR / "combine-subtitles.ps1"
 
@@ -39,21 +41,17 @@ def load_config() -> dict:
         except (json.JSONDecodeError, OSError):
             pass
     return {}
-
-
-def process_chunk(idx, chunk_name, expected_file, cmd, output_dir):
+def process_chunk(idx, chunk_name, chunk_file, expected_file, output_dir):
     start_time = time.time()
     try:
-        proc = subprocess.run(cmd, cwd=str(output_dir), capture_output=True)
+        ok, err_msg = translate_chunk(chunk_file, expected_file)
         elapsed = time.time() - start_time
-        if proc.returncode == 0 and expected_file.exists():
-            return (idx, chunk_name, "success", elapsed, expected_file)
+        if ok:
+            return (idx, chunk_name, "success", elapsed, expected_file, "")
         else:
-            return (idx, chunk_name, "failed", elapsed, expected_file)
-    except FileNotFoundError:
-        return (idx, chunk_name, "error", 0, expected_file)
-    except Exception:
-        return (idx, chunk_name, "error", time.time() - start_time, expected_file)
+            return (idx, chunk_name, "failed", elapsed, expected_file, err_msg)
+    except Exception as e:
+        return (idx, chunk_name, "error", time.time() - start_time, expected_file, str(e))
 
 
 def setup_logging(log_dir: Path) -> logging.Logger:
@@ -112,13 +110,15 @@ def run_powershell(script: Path, params: list[str], workdir: Path,
     try:
         proc = subprocess.run(
             cmd, cwd=str(workdir),
-            capture_output=True, encoding='utf-8',
+            capture_output=True,
             timeout=timeout,
         )
-        if proc.stdout and proc.stdout.strip():
-            logger.info("%s", proc.stdout.strip())
-        if proc.stderr and proc.stderr.strip():
-            logger.warning("%s", proc.stderr.strip())
+        stdout = proc.stdout.decode("utf-8", errors="replace") if proc.stdout else ""
+        stderr = proc.stderr.decode("utf-8", errors="replace") if proc.stderr else ""
+        if stdout.strip():
+            logger.info("%s", stdout.strip())
+        if stderr.strip():
+            logger.warning("%s", stderr.strip())
         if proc.returncode != 0:
             logger.error("PowerShell exit code: %d", proc.returncode)
             return False
@@ -153,6 +153,8 @@ def main():
                         help="Skip SRT text extraction, treat input as raw TXT")
     parser.add_argument("--no-combine", action="store_true",
                         help="Skip final bilingual SRT combination")
+    parser.add_argument("--skip-translate", action="store_true",
+                        help="Skip chunk translation, only aggregate existing _chinese.txt files")
     args = parser.parse_args()
 
     config = load_config()
@@ -256,8 +258,6 @@ def main():
             conn.close()
         except Exception:
             pass
-
-
     results = []
     tasks = []
 
@@ -265,68 +265,68 @@ def main():
         chunk_name = f"chunk_{idx:03d}"
         chunk_file = output_dir / f"{chunk_name}.txt"
         expected_file = output_dir / f"{chunk_name}_chinese.txt"
-        log_file = output_dir / f"{chunk_name}_opencode.log"
 
-        logger.info("Writing %s (lines %d-%d, %d lines)", chunk_file.name, line_start + 1, line_end, len(chunk_lines))
-        with open(chunk_file, "w", encoding="utf-8") as f:
-            f.writelines(chunk_lines)
+        if not args.skip_translate:
+            logger.info("Writing %s (lines %d-%d, %d lines)", chunk_file.name, line_start + 1, line_end, len(chunk_lines))
+            with open(chunk_file, "w", encoding="utf-8") as f:
+                f.writelines(chunk_lines)
 
-        prompt = f"使用skill: chunk-translator, 翻译文件 {chunk_file}"
+        tasks.append((idx, chunk_name, chunk_file, expected_file))
 
-        cmd = [
-            sys.executable, str(RUN_OPENCODE),
-            "--prompt", prompt,
-            "--expected-file", str(expected_file),
-            "--workdir", str(output_dir),
-            "--log-file", str(log_file),
-            "--timeout", str(args.timeout),
-            "--log-filter", args.log_filter,
-        ]
+    if args.skip_translate:
+        logger.info("Skipping translation, using existing _chinese.txt files")
+        results = []
+        for idx, chunk_name, chunk_file, expected_file in tasks:
+            if expected_file.exists():
+                results.append((idx, chunk_name, "success", 0, expected_file, ""))
+                logger.info("  Found %s", expected_file.name)
+            else:
+                logger.error("  Missing %s", expected_file.name)
+                results.append((idx, chunk_name, "failed", 0, expected_file, "missing _chinese.txt"))
+    else:
+        logger.info("Starting parallel translation with %d threads", thread_num)
 
-        tasks.append((idx, chunk_name, expected_file, cmd))
+        executor = ThreadPoolExecutor(max_workers=thread_num)
+        try:
+            futures_map = {}
+            for idx, chunk_name, chunk_file, expected_file in tasks:
+                future = executor.submit(process_chunk, idx, chunk_name, chunk_file, expected_file, output_dir)
+                futures_map[future] = (idx, chunk_name)
+                logger.info("  Submitted [%d/%d] %s", idx, chunk_count, chunk_name)
 
-    logger.info("Starting parallel translation with %d threads", thread_num)
-
-    executor = ThreadPoolExecutor(max_workers=thread_num)
-    try:
-        futures_map = {}
-        for idx, chunk_name, expected_file, cmd in tasks:
-            future = executor.submit(process_chunk, idx, chunk_name, expected_file, cmd, output_dir)
-            futures_map[future] = (idx, chunk_name)
-            logger.info("  Submitted [%d/%d] %s", idx, chunk_count, chunk_name)
-
-        for future in as_completed(futures_map):
-            idx, chunk_name = futures_map[future]
-            try:
-                result = future.result()
-                results.append(result)
-                status, elapsed = result[2], result[3]
-                if status == "success":
-                    print(f"[PROGRESS] {results[-1][0]}/{chunk_count} {chunk_name} OK ({elapsed:.1f}s)", flush=True)
-                    logger.info("  [OK] [%d/%d] %s completed in %.1fs", idx, chunk_count, chunk_name, elapsed)
-                    _inc_progress()
-                else:
-                    print(f"[PROGRESS] {len(results)}/{chunk_count} {chunk_name} FAIL ({elapsed:.1f}s)", flush=True)
-                    logger.error("  [FAIL] [%d/%d] %s (%.1fs)", idx, chunk_count, chunk_name, elapsed)
-            except Exception as e:
-                results.append((idx, chunk_name, "error", 0, output_dir / f"{chunk_name}_chinese.txt"))
-                print(f"[PROGRESS] {len(results)}/{chunk_count} {chunk_name} ERROR", flush=True)
-                logger.error("  [ERROR] [%d/%d] %s: %s", idx, chunk_count, chunk_name, e)
+            for future in as_completed(futures_map):
+                idx, chunk_name = futures_map[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                    status, elapsed = result[2], result[3]
+                    err_msg = result[5] if len(result) > 5 else ""
+                    if status == "success":
+                        print(f"[PROGRESS] {len(results)}/{chunk_count} {chunk_name} OK ({elapsed:.1f}s)", flush=True)
+                        logger.info("  [OK] [%d/%d] %s completed in %.1fs", idx, chunk_count, chunk_name, elapsed)
+                        _inc_progress()
+                    else:
+                        print(f"[PROGRESS] {len(results)}/{chunk_count} {chunk_name} FAIL ({elapsed:.1f}s)", flush=True)
+                        logger.error("  [FAIL] [%d/%d] %s (%.1fs): %s", idx, chunk_count, chunk_name, elapsed, err_msg)
+                except Exception as e:
+                    results.append((idx, chunk_name, "error", 0, output_dir / f"{chunk_name}_chinese.txt", str(e)))
+                    print(f"[PROGRESS] {len(results)}/{chunk_count} {chunk_name} ERROR", flush=True)
+                    logger.error("  [ERROR] [%d/%d] %s: %s", idx, chunk_count, chunk_name, e)
 
 
-    except KeyboardInterrupt:
-        logger.warning("Interrupted by user, shutting down...")
-        executor.shutdown(wait=False, cancel_futures=True)
-        sys.exit(5)
-    finally:
-        executor.shutdown(wait=False)
+        except KeyboardInterrupt:
+            logger.warning("Interrupted by user, shutting down...")
+            executor.shutdown(wait=False, cancel_futures=True)
+            sys.exit(5)
+        finally:
+            executor.shutdown(wait=False)
 
     results.sort(key=lambda r: r[0])
 
     logger.info("=" * 60)
     logger.info("Summary:")
     all_success = True
-    for idx, name, status, elapsed, _ in results:
+    for idx, name, status, elapsed, _, _ in results:
         logger.info("  Chunk %d | %-20s | %-8s | %6.1fs", idx, name, status, elapsed)
         if status != "success":
             all_success = False
@@ -338,7 +338,7 @@ def main():
     base_name = input_path.stem
     final_output = workspace_dir / f"{base_name}_chinese.txt"
     with open(final_output, "w", encoding="utf-8") as outf:
-        for idx, _, _, _, chunk_output_path in results:
+        for idx, _, _, _, chunk_output_path, _ in results:
             with open(chunk_output_path, "r", encoding="utf-8") as inf:
                 outf.write(inf.read().rstrip("\n"))
                 outf.write("\n")

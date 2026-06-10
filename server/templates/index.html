@@ -23,6 +23,7 @@
 {{items}}
 
 <script>
+// Job form submission
 document.getElementById('job-form').addEventListener('submit', async function(e) {
     e.preventDefault();
     const url = document.getElementById('yt-url').value.trim();
@@ -47,7 +48,59 @@ document.getElementById('job-form').addEventListener('submit', async function(e)
         msg.textContent = '服务器错误: ' + err.message;
     }
 });
-</script>
 
-</body>
+// Delete button handler (event delegation)
+document.addEventListener('click', async function(e) {
+    const btn = e.target.closest('.job-delete-btn');
+    if (!btn || btn.disabled) return;
+
+    const jobId = btn.dataset.jobId;
+    const msgEl = btn.parentElement.querySelector('.job-msg');
+    btn.disabled = true;
+    btn.textContent = '...';
+
+    try {
+        const resp = await fetch('/api/jobs/' + jobId + '/delete', { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            btn.closest('.job-item').remove();
+        } else {
+            btn.disabled = false;
+            btn.textContent = '删除';
+            if (msgEl) msgEl.textContent = data.error || '删除失败';
+        }
+    } catch (err) {
+        btn.disabled = false;
+        btn.textContent = '\u5220\u9664';
+        if (msgEl) msgEl.textContent = '\u670d\u52a1\u5668\u9519\u8bef: ' + err.message;
+    }
+});
+
+// Retry button handler (event delegation)
+document.addEventListener('click', async function(e) {
+    const btn = e.target.closest('.job-retry-btn');
+    if (!btn || btn.disabled) return;
+
+    const jobId = btn.dataset.jobId;
+    const msgEl = btn.parentElement.querySelector('.job-msg');
+    btn.disabled = true;
+    btn.textContent = '...';
+
+    try {
+        const resp = await fetch('/api/jobs/' + jobId + '/retry', { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            if (msgEl) msgEl.textContent = '\u91cd\u8bd5\u5df2\u542f\u52a8';
+        } else {
+            btn.disabled = false;
+            btn.textContent = '\u91cd\u8bd5';
+            if (msgEl) msgEl.textContent = data.error || '\u91cd\u8bd5\u5931\u8d25';
+        }
+    } catch (err) {
+        btn.disabled = false;
+        btn.textContent = '\u91cd\u8bd5';
+        if (msgEl) msgEl.textContent = '\u670d\u52a1\u5668\u9519\u8bef: ' + err.message;
+    }
+});
+</script>
 </html>

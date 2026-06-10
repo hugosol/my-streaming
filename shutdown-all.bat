@@ -13,5 +13,5 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr :8888 ^| findstr LISTENING') 
 )
 
 echo.
-echo All stopped.
-pause
+echo All stopped. Window will close in 2 seconds...
+timeout /t 2 /nobreak >nul

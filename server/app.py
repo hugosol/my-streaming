@@ -21,23 +21,21 @@ _INDEX_ITEM = '<div class="index-item"><a href="/play/{{id}}">{{name}}</a>{{sub_
 _SUB_BADGE = ' <span class="sub-badge">CC</span>'
 
 _JOB_ICONS = {
-    "pending": "⏳",
-    "downloading": "⬇",
-    "punctuating": "📝",
-    "resegmenting": "✂",
-    "translating": "🔄",
-    "finalizing": "📦",
-    "failed": "❌",
+    "pending": "\u23f3",
+    "downloading": "\u2b07",
+    "punctuating": "\U0001F4DD",
+    "resegmenting": "\u2702",
+    "translating": "\U0001F504",
+    "finalizing": "\U0001F4E6",
 }
 
 _JOB_LABELS = {
-    "pending": "等待中",
-    "downloading": "下载中",
-    "punctuating": "标点处理中",
-    "resegmenting": "重新分句中",
-    "translating": "翻译中",
-    "finalizing": "收尾中",
-    "failed": "失败",
+    "pending": "\u7b49\u5f85\u4e2d",
+    "downloading": "\u4e0b\u8f7d\u4e2d",
+    "punctuating": "\u6807\u70b9\u5904\u7406\u4e2d",
+    "resegmenting": "\u91cd\u65b0\u5206\u53e5\u4e2d",
+    "translating": "\u7ffb\u8bd1\u4e2d",
+    "finalizing": "\u6536\u5c3e\u4e2d",
 }
 _INDEX_TPL = (_TEMPLATE_DIR / "index.html").read_text(encoding="utf-8")
 _PLAYER_TPL = (_TEMPLATE_DIR / "player.html").read_text(encoding="utf-8")
@@ -49,8 +47,8 @@ _SEGMENT_RE = re.compile(r"^/stream/([a-f0-9]+)/segment_\d+\.ts$")
 _PLAYLIST_RE = re.compile(r"^/stream/([a-f0-9]+)/playlist\.m3u8$")
 _VTT_RE = re.compile(r"^/stream/([a-f0-9]+)/subtitles\.vtt$")
 _EXTINF_RE = re.compile(r"#EXTINF:([\d.]+),\s*\n(segment_\d+\.ts)")
-
-
+_JOB_DELETE_RE = re.compile(r"^/api/jobs/([a-f0-9]+)/delete$")
+_JOB_RETRY_RE = re.compile(r"^/api/jobs/([a-f0-9]+)/retry$")
 def _merge_playlists(static_path: Path, ffmpeg_path: Path, start_at: float = 0) -> str:
     static_text = static_path.read_text(encoding="utf-8")
     static_pairs = _EXTINF_RE.findall(static_text)
@@ -113,10 +111,10 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
         try:
             conn = _get_conn()
             rows = conn.execute(
-                "SELECT id, url, video_id, status, progress, video_name, error, created_at, updated_at "
-                "FROM jobs WHERE status != 'done' ORDER BY created_at DESC"
+                "SELECT id, url, video_id, stage, status, progress, video_name, error, created_at, updated_at "
+                "FROM jobs WHERE status IN ('in_progress', 'failed') ORDER BY created_at DESC"
             ).fetchall()
-            cols = ["id", "url", "video_id", "status", "progress", "video_name", "error", "created_at", "updated_at"]
+            cols = ["id", "url", "video_id", "stage", "status", "progress", "video_name", "error", "created_at", "updated_at"]
             return [dict(zip(cols, row)) for row in rows]
         except Exception:
             return []
@@ -161,6 +159,17 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
 
         def do_POST(self):
             path = urlparse(self.path).path
+
+            # Route: delete job
+            if m := _JOB_DELETE_RE.match(path):
+                self._forward_job_action(m.group(1), "delete")
+                return
+
+            # Route: retry job
+            if m := _JOB_RETRY_RE.match(path):
+                self._forward_job_action(m.group(1), "retry")
+                return
+
             if path == "/api/jobs":
                 self._submit_job()
             else:
@@ -178,22 +187,46 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
             if active_jobs:
                 jobs_html += '<div class="jobs-section"><h2>任务</h2>'
                 for job in active_jobs:
-                    icon = _JOB_ICONS.get(job["status"], "⏳")
-                    label = _JOB_LABELS.get(job["status"], job["status"])
+                    stage = job.get("stage", "")
+                    icon = _JOB_ICONS.get(stage, "\u23f3")
+                    label = _JOB_LABELS.get(stage, stage)
                     progress = html.escape(job["progress"] or "")
                     error = html.escape(job["error"] or "")
                     video_name = html.escape(job["video_name"] or "")[:15]
                     video_id = html.escape(job["video_id"] or "")
                     name = video_name or video_id
+                    is_failed = job.get("status") == "failed"
 
                     parts = [icon, label]
                     if progress:
-                        parts.append(f"（{progress}）")
+                        parts.append(f"\uff08{progress}\uff09")
                     if name:
                         parts.append(name)
-                    detail = f"（{error}）" if error else ""
-                    jobs_html += f'<div class="job-item">{" ".join(parts)}{detail}</div>'
-                jobs_html += '</div>'
+                    detail = f"\uff08{error}\uff09" if error else ""
+                    failed_class = " job-failed" if is_failed else ""
+                    job_id_attr = html.escape(job["id"])
+                    stage_attr = html.escape(stage)
+                    status_attr = html.escape(job.get("status", ""))
+
+                    buttons_html = ""
+                    if is_failed:
+                        if stage == "translating":
+                            buttons_html = (
+                                f' <button class="job-btn job-retry-btn" data-job-id="{job_id_attr}">\u91cd\u8bd5</button>'
+                                f' <button class="job-btn job-delete-btn" data-job-id="{job_id_attr}">\u5220\u9664</button>'
+                            )
+                        else:
+                            buttons_html = f' <button class="job-btn job-delete-btn" data-job-id="{job_id_attr}">\u5220\u9664</button>'
+
+                    jobs_html += (
+                        f'<div class="job-item{failed_class}"'
+                        f' data-job-id="{job_id_attr}"'
+                        f' data-stage="{stage_attr}"'
+                        f' data-status="{status_attr}">'
+                        f'{" ".join(parts)}{detail}{buttons_html}'
+                        f'<span class="job-msg"></span>'
+                        f'</div>'
+                    )
 
             html_content = _render(_INDEX_TPL, items=items_html, jobs=jobs_html)
             self._respond_html(html_content)
@@ -238,17 +271,33 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
                 status_code = e.code
             except Exception as e:
                 self._respond_json({"error": f"Worker unreachable: {e}"}, 503)
+            self._respond_json(result, status_code)
+
+        def _forward_job_action(self, job_id: str, action: str) -> None:
+            """Forward job delete/retry to worker and relay response."""
+            port = _get_worker_port()
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/job/{job_id}/{action}",
+                    data=b"{}",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+                    status_code = resp.status
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8")
+                try:
+                    result = json.loads(body)
+                except Exception:
+                    result = {"error": body}
+                status_code = e.code
+            except Exception as e:
+                self._respond_json({"error": f"Worker unreachable: {e}"}, 503)
                 return
 
             self._respond_json(result, status_code)
-
-        def _respond_json(self, data, status=200):
-            body = json.dumps(data, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
 
         def _serve_player(self, video_id):
             videos = self._scan()
@@ -402,5 +451,13 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(data)
+
+        def _respond_json(self, data: dict | list, status: int = 200) -> None:
+            body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
     return StreamingHandler
