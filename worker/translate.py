@@ -3,6 +3,7 @@
 Used by both batch_translate.py (full pipeline) and retry logic (single chunk).
 """
 
+import re
 import sys
 import time
 from pathlib import Path
@@ -32,14 +33,39 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
     input_lines = input_text.strip().split("\n")
     input_line_count = len(input_lines)
 
+    # Build numbered input text for attempt 2 (line-by-line fallback)
+    numbered_lines = [f"[{i + 1}] {line}" for i, line in enumerate(input_lines)]
+    numbered_text = "\n".join(numbered_lines)
+
     prompts = [
-        f"翻译以下英文文本为中文，输出纯中文。\n"
-        f"重要：输入共 {input_line_count} 行，输出必须恰好 {input_line_count} 行，一行不多一行不少。\n\n"
+        # Attempt 1: 整体翻译 + 强制行数约束
+        f"【最高优先级：行数必须等于 {input_line_count}】\n\n"
+        f"翻译以下英文文本为中文。\n\n"
+        f"硬性要求（违反即为失败）：\n"
+        f"1. 输出恰好 {input_line_count} 行，一行不多、一行不少\n"
+        f"2. 每行中文对应同位置的一行英文\n"
+        f"3. 不要在行内使用换行符\n"
+        f"4. 不要在输出中添加序号、标记或任何额外内容\n\n"
+        f"宁可拆分不自然、宁可每行不是完整句子，也必须保证恰好 {input_line_count} 行。\n\n"
         f"{input_text}",
-        f"上次翻译行数不对。重新翻译以下英文文本为中文，输出纯中文。\n"
-        f"严格约束：输入共 {input_line_count} 行，你的输出必须恰好 {input_line_count} 行。"
-        f"逐行检查，确保第 i 行中文对应第 i 行英文。宁可拆分不自然也要保证行数正确。\n\n"
-        f"{input_text}",
+
+        # Attempt 2: 逐行编号翻译（回退方案，更可靠）
+        f"【逐行翻译模式 — 必须严格遵守格式】\n\n"
+        f"下面有 {input_line_count} 行英文，每行以 [行号] 开头。\n"
+        f"请逐行翻译为中文，输出格式必须与输入格式完全对应。\n\n"
+        f"格式规则（缺一不可）：\n"
+        f"- 输出恰好 {input_line_count} 行\n"
+        f"- 每行以 [行号] 开头，后面紧跟该行的中文翻译\n"
+        f"- 行号从 1 到 {input_line_count}，连续不跳号\n"
+        f"- [行号] 和中文之间用一个空格分隔\n"
+        f"- 不输出英文原文，只输出 [行号] + 中文\n"
+        f"- 不添加任何解释、汇总或其他内容\n\n"
+        f"示例（如果输入有3行）：\n"
+        f"[1] 你好世界\n"
+        f"[2] 这是第二行\n"
+        f"[3] 这是第三行\n\n"
+        f"现在开始翻译以下 {input_line_count} 行：\n\n"
+        f"{numbered_text}",
     ]
 
     max_retries = min(len(prompts), 3)
@@ -66,6 +92,21 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
             if attempt + 1 >= max_retries:
                 return False, last_error
             continue
+
+        # Attempt 2: strip [N] prefixes from numbered output
+        if attempt == 1:
+            raw_lines = result.strip().split("\n")
+            stripped = []
+            for line in raw_lines:
+                line = line.strip()
+                m = re.match(r"\[\d+\]\s*(.*)", line)
+                if m:
+                    stripped.append(m.group(1))
+                else:
+                    stripped.append(line)
+            # Check if numbered format was used; if all lines had prefixes, use stripped version
+            if all(re.match(r"\[\d+\]", l.strip()) for l in raw_lines if l.strip()):
+                result = "\n".join(stripped)
 
         output_lines = result.strip().split("\n")
         output_line_count = len(output_lines)

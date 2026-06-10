@@ -8,6 +8,7 @@ Progress is written to db/jobs.db (shared with the streaming server).
 """
 
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -170,6 +171,8 @@ def _run_subprocess(cmd: list[str], cwd: Path, label: str, on_line: object = Non
         on_line: Optional callback(str) invoked for each output line.
     """
     print(f"[{label}] Starting: {' '.join(cmd)}")
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8:replace"
     proc = subprocess.Popen(
         cmd,
         cwd=str(cwd),
@@ -177,6 +180,7 @@ def _run_subprocess(cmd: list[str], cwd: Path, label: str, on_line: object = Non
         stderr=subprocess.STDOUT,
         text=True,
         errors="replace",
+        env=env,
     )
     for line in proc.stdout:  # type: ignore[union-attr]
         stripped = line.rstrip()
