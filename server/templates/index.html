@@ -7,7 +7,47 @@
     <link rel="stylesheet" href="/static/index.css">
 </head>
 <body>
-<h1>Videos</h1>
+<h1>My Streaming</h1>
+
+<div class="input-section">
+    <form id="job-form">
+        <input type="text" id="yt-url" name="url" placeholder="YouTube 链接..." autocomplete="off">
+        <button type="submit">提交</button>
+    </form>
+    <div id="form-msg"></div>
+</div>
+
+{{jobs}}
+
+<h2>视频</h2>
 {{items}}
+
+<script>
+document.getElementById('job-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const url = document.getElementById('yt-url').value.trim();
+    const msg = document.getElementById('form-msg');
+    if (!url) { msg.textContent = '请输入链接'; return; }
+
+    msg.textContent = '提交中...';
+    try {
+        const resp = await fetch('/api/jobs', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({url: url})
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            document.getElementById('yt-url').value = '';
+            msg.textContent = '已提交，刷新页面查看进度';
+        } else {
+            msg.textContent = data.error || '提交失败';
+        }
+    } catch (err) {
+        msg.textContent = '服务器错误: ' + err.message;
+    }
+});
+</script>
+
 </body>
 </html>

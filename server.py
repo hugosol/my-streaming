@@ -1,4 +1,5 @@
 import argparse
+import json
 import signal
 import sys
 from http.server import HTTPServer
@@ -8,7 +9,7 @@ from socketserver import ThreadingMixIn
 import qrcode
 
 from server.app import make_handler
-from server.network import find_port, get_lan_ip
+from server.network import get_lan_ip
 from server.scanner import scan_directory
 from server.transcoder import Transcoder
 
@@ -36,20 +37,35 @@ def main():
     parser.add_argument(
         "directory",
         nargs="?",
-        default=".",
-        help="Directory containing .mp4 files (default: current directory)",
+        default=None,
+        help="Directory containing .mp4 files (default: from config.json video_dir, or current dir)",
     )
     args = parser.parse_args()
 
-    dir_path = Path(args.directory).resolve()
+    if args.directory:
+        dir_path = Path(args.directory).resolve()
+    else:
+        # Read from config.json
+        config_path = Path(__file__).parent / "config.json"
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            vd = config.get("video_dir", ".")
+            dir_path = Path(vd)
+            if not dir_path.is_absolute():
+                dir_path = (Path(__file__).parent / dir_path).resolve()
+            else:
+                dir_path = dir_path.resolve()
+        except Exception:
+            dir_path = Path.cwd()
     if not dir_path.is_dir():
-        print(f"Error: '{args.directory}' is not a directory")
+        print(f"Error: '{dir_path}' is not a directory")
         sys.exit(1)
 
     videos = scan_directory(str(dir_path))
 
     ip = get_lan_ip()
-    port = find_port(8888)
+    port = 8888
 
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
 

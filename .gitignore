@@ -4,3 +4,5 @@ temp/
 *.mp4
 *.srt
 .idea/
+jobs/
+db/

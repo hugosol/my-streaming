@@ -37,3 +37,65 @@ h1 {
   color: #888;
   font-size: 12px;
 }
+
+.input-section {
+  margin-bottom: 20px;
+}
+
+.input-section form {
+  display: flex;
+  gap: 8px;
+}
+
+.input-section input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid #444;
+  border-radius: 6px;
+  background: #222;
+  color: #eee;
+  font-size: 15px;
+  outline: none;
+}
+
+.input-section input:focus {
+  border-color: #4da6ff;
+}
+
+.input-section button {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  background: #4da6ff;
+  color: #fff;
+  font-size: 15px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.input-section button:hover {
+  background: #3d8ae0;
+}
+
+#form-msg {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #888;
+}
+
+.jobs-section {
+  margin-bottom: 20px;
+}
+
+.jobs-section h2 {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.job-item {
+  padding: 8px 0;
+  border-bottom: 1px solid #2a2a2a;
+  font-size: 14px;
+  color: #aaa;
+}

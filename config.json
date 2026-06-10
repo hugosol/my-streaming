@@ -1,0 +1,18 @@
+{
+  "video_dir": "E:/Developer/youtube-playground/new-streaaming",
+  "worker_port": 8899,
+  "db_path": "db/jobs.db",
+  "model": "deepseek/deepseek-v4-flash",
+  "deepseek_api_key": "sk-****",
+  "yt_download_proxy": "http://127.0.0.1:10808",
+  "translation": {
+    "chunk_size": "auto",
+    "min_size": 30,
+    "max_size": 100,
+    "thread_num": 4
+  },
+  "punctuation_check": {
+    "expected_per_lines": 0.333,
+    "threshold_factor": 0.4
+  }
+}

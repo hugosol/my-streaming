@@ -1,6 +1,11 @@
 import html
+import json
+import os
 import re
+import sqlite3
+import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -12,7 +17,28 @@ from .transcoder import Transcoder
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 _STATIC_DIR = Path(__file__).parent / "static"
+_INDEX_ITEM = '<div class="index-item"><a href="/play/{{id}}">{{name}}</a>{{sub_badge}}</div>'
+_SUB_BADGE = ' <span class="sub-badge">CC</span>'
 
+_JOB_ICONS = {
+    "pending": "⏳",
+    "downloading": "⬇",
+    "punctuating": "📝",
+    "resegmenting": "✂",
+    "translating": "🔄",
+    "finalizing": "📦",
+    "failed": "❌",
+}
+
+_JOB_LABELS = {
+    "pending": "等待中",
+    "downloading": "下载中",
+    "punctuating": "标点处理中",
+    "resegmenting": "重新分句中",
+    "translating": "翻译中",
+    "finalizing": "收尾中",
+    "failed": "失败",
+}
 _INDEX_TPL = (_TEMPLATE_DIR / "index.html").read_text(encoding="utf-8")
 _PLAYER_TPL = (_TEMPLATE_DIR / "player.html").read_text(encoding="utf-8")
 
@@ -53,6 +79,51 @@ def _render(template: str, **kwargs) -> str:
 
 
 def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
+    # Load project config (lazy, from project root)
+    _root = Path(__file__).parent.parent
+    _config_path = _root / "config.json"
+    _config: dict = {}
+    _conn: sqlite3.Connection | None = None
+    _conn_lock = threading.Lock()
+
+    def _load_config() -> dict:
+        nonlocal _config
+        if not _config:
+            try:
+                with open(_config_path, "r", encoding="utf-8") as f:
+                    _config = json.load(f)
+            except Exception:
+                pass
+        return _config
+
+    def _get_conn() -> sqlite3.Connection:
+        nonlocal _conn
+        if _conn is None:
+            db_rel = _load_config().get("db_path", "db/jobs.db")
+            db_path = Path(db_rel)
+            if not db_path.is_absolute():
+                db_path = _root / db_path
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            _conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            _conn.execute("PRAGMA journal_mode=WAL")
+            _conn.execute("PRAGMA busy_timeout=5000")
+        return _conn
+
+    def _get_active_jobs() -> list[dict]:
+        try:
+            conn = _get_conn()
+            rows = conn.execute(
+                "SELECT id, url, video_id, status, progress, video_name, error, created_at, updated_at "
+                "FROM jobs WHERE status != 'done' ORDER BY created_at DESC"
+            ).fetchall()
+            cols = ["id", "url", "video_id", "status", "progress", "video_name", "error", "created_at", "updated_at"]
+            return [dict(zip(cols, row)) for row in rows]
+        except Exception:
+            return []
+
+    def _get_worker_port() -> int:
+        return int(_load_config().get("worker_port", 8899))
+
     class StreamingHandler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             pass
@@ -67,6 +138,8 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
             try:
                 if path == "/":
                     self._serve_index()
+                elif path == "/api/jobs":
+                    self._serve_jobs()
                 elif path.startswith("/play/"):
                     video_id = path.rsplit("/", 1)[-1]
                     self._serve_player(video_id)
@@ -86,14 +159,96 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
             except (ValueError, IndexError, KeyError):
                 self._serve_404()
 
+        def do_POST(self):
+            path = urlparse(self.path).path
+            if path == "/api/jobs":
+                self._submit_job()
+            else:
+                self._serve_404()
         def _serve_index(self):
             videos = self._scan()
             items_html = ""
             for video_id, v in videos.items():
                 badge = _SUB_BADGE if v.has_subtitle else ""
                 items_html += _render(_INDEX_ITEM, id=video_id, name=html.escape(v.name), sub_badge=badge)
-            html_content = _render(_INDEX_TPL, items=items_html)
+
+            # Render active jobs
+            active_jobs = _get_active_jobs()
+            jobs_html = ""
+            if active_jobs:
+                jobs_html += '<div class="jobs-section"><h2>任务</h2>'
+                for job in active_jobs:
+                    icon = _JOB_ICONS.get(job["status"], "⏳")
+                    label = _JOB_LABELS.get(job["status"], job["status"])
+                    progress = html.escape(job["progress"] or "")
+                    error = html.escape(job["error"] or "")
+                    video_name = html.escape(job["video_name"] or "")[:15]
+                    video_id = html.escape(job["video_id"] or "")
+                    name = video_name or video_id
+
+                    parts = [icon, label]
+                    if progress:
+                        parts.append(f"（{progress}）")
+                    if name:
+                        parts.append(name)
+                    detail = f"（{error}）" if error else ""
+                    jobs_html += f'<div class="job-item">{" ".join(parts)}{detail}</div>'
+                jobs_html += '</div>'
+
+            html_content = _render(_INDEX_TPL, items=items_html, jobs=jobs_html)
             self._respond_html(html_content)
+
+        def _serve_jobs(self):
+            """GET /api/jobs — return active jobs as JSON."""
+            jobs = _get_active_jobs()
+            self._respond_json(jobs)
+
+        def _submit_job(self):
+            """POST /api/jobs — submit a new YouTube download task."""
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self._respond_json({"error": "invalid JSON"}, 400)
+                return
+
+            url = data.get("url", "").strip()
+            if not url:
+                self._respond_json({"error": "missing url"}, 400)
+                return
+
+            port = _get_worker_port()
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/job",
+                    data=json.dumps({"url": url}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+                    status_code = resp.status
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8")
+                try:
+                    result = json.loads(body)
+                except Exception:
+                    result = {"error": body}
+                status_code = e.code
+            except Exception as e:
+                self._respond_json({"error": f"Worker unreachable: {e}"}, 503)
+                return
+
+            self._respond_json(result, status_code)
+
+        def _respond_json(self, data, status=200):
+            body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def _serve_player(self, video_id):
             videos = self._scan()
