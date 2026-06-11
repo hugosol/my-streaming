@@ -394,7 +394,10 @@ def _do_finalize(job_id: str, srt_path: Path) -> bool:
         if not dest.exists():
             mp4.replace(dest)
 
+    # Move only the active SRT (not -bak / -src backups)
     for srt in job_dir.glob("*.srt"):
+        if "-bak" in srt.stem or "-src" in srt.stem:
+            continue
         dest = video_dir / srt.name
         srt.replace(dest)
 
@@ -491,7 +494,33 @@ def _do_retry(job_id: str) -> None:
             A += 1
             _update_job(job_id, progress=f"{A}/{B}")
 
-        # 6. Re-finalize
+        # 6. Aggregate _chinese.txt chunks and combine back to bilingual SRT
+        original_txt = workspace_dir / f"{srt_path.stem}_original.txt"
+        chinese_txt = workspace_dir / f"{srt_path.stem}_chinese.txt"
+
+        chunk_files_sorted = sorted(
+            [f for f in chunks_dir.glob("chunk_*.txt") if "_chinese" not in f.stem]
+        )
+        with open(chinese_txt, "w", encoding="utf-8") as outf:
+            for cf in chunk_files_sorted:
+                chinese_chunk = chunks_dir / f"{cf.stem}_chinese.txt"
+                if chinese_chunk.exists():
+                    outf.write(chinese_chunk.read_text(encoding="utf-8").rstrip("\n"))
+                    outf.write("\n")
+
+        combine_script = _SCRIPTS_DIR / "combine-subtitles.ps1"
+        rc = _run_subprocess(
+            ["powershell.exe", "-ExecutionPolicy", "Bypass", "-File", str(combine_script),
+             "-InputFile", str(srt_path),
+             "-OriginalText", str(original_txt),
+             "-ChineseText", str(chinese_txt)],
+            job_dir, "COMBINE-RETRY",
+        )
+        if rc != 0:
+            _update_job(job_id, status="failed", error="双语字幕合并失败")
+            return
+
+        # 7. Re-finalize
         if not _do_finalize(job_id, srt_path):
             return
 
