@@ -17,7 +17,7 @@ from .transcoder import Transcoder
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 _STATIC_DIR = Path(__file__).parent / "static"
-_INDEX_ITEM = '<div class="index-item"><a href="/play/{{id}}">{{name}}</a>{{sub_badge}}</div>'
+_INDEX_ITEM = '<div class="index-item"><a href="/play/{{id}}">{{name}}</a>{{sub_badge}}<button class="job-btn video-delete-btn" data-video-md5="{{id}}">删除</button><button class="job-btn video-redownload-btn" data-video-md5="{{id}}">重新下载</button></div>'
 _SUB_BADGE = ' <span class="sub-badge">CC</span>'
 
 _JOB_ICONS = {
@@ -40,7 +40,7 @@ _JOB_LABELS = {
 _INDEX_TPL = (_TEMPLATE_DIR / "index.html").read_text(encoding="utf-8")
 _PLAYER_TPL = (_TEMPLATE_DIR / "player.html").read_text(encoding="utf-8")
 
-_INDEX_ITEM = '<div class="index-item"><a href="/play/{{id}}">{{name}}</a>{{sub_badge}}</div>'
+_INDEX_ITEM = '<div class="index-item"><a href="/play/{{id}}">{{name}}</a>{{sub_badge}}<button class="job-btn video-delete-btn" data-video-md5="{{id}}">删除</button><button class="job-btn video-redownload-btn" data-video-md5="{{id}}">重新下载</button></div>'
 _SUB_BADGE = ' <span class="sub-badge">CC</span>'
 
 _SEGMENT_RE = re.compile(r"^/stream/([a-f0-9]+)/segment_\d+\.ts$")
@@ -49,6 +49,8 @@ _VTT_RE = re.compile(r"^/stream/([a-f0-9]+)/subtitles\.vtt$")
 _EXTINF_RE = re.compile(r"#EXTINF:([\d.]+),\s*\n(segment_\d+\.ts)")
 _JOB_DELETE_RE = re.compile(r"^/api/jobs/([a-f0-9]+)/delete$")
 _JOB_RETRY_RE = re.compile(r"^/api/jobs/([a-f0-9]+)/retry$")
+_VIDEO_DELETE_RE = re.compile(r"^/api/videos/([a-f0-9]+)/delete$")
+_VIDEO_REDOWNLOAD_RE = re.compile(r"^/api/videos/([a-f0-9]+)/redownload$")
 def _merge_playlists(static_path: Path, ffmpeg_path: Path, start_at: float = 0) -> str:
     static_text = static_path.read_text(encoding="utf-8")
     static_pairs = _EXTINF_RE.findall(static_text)
@@ -170,6 +172,16 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
                 self._forward_job_action(m.group(1), "retry")
                 return
 
+            # Route: video delete
+            if m := _VIDEO_DELETE_RE.match(path):
+                self._forward_video_action(m.group(1), "delete")
+                return
+
+
+            # Route: video redownload
+            if m := _VIDEO_REDOWNLOAD_RE.match(path):
+                self._forward_video_action(m.group(1), "redownload")
+                return
             if path == "/api/jobs":
                 self._submit_job()
             else:
@@ -280,6 +292,32 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
                 req = urllib.request.Request(
                     f"http://127.0.0.1:{port}/job/{job_id}/{action}",
                     data=b"{}",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+                    status_code = resp.status
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8")
+                try:
+                    result = json.loads(body)
+                except Exception:
+                    result = {"error": body}
+                status_code = e.code
+            except Exception as e:
+                self._respond_json({"error": f"Worker unreachable: {e}"}, 503)
+                return
+
+            self._respond_json(result, status_code)
+
+        def _forward_video_action(self, video_md5: str, action: str) -> None:
+            """Forward video delete/redownload to worker and relay response."""
+            port = _get_worker_port()
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/video/{action}",
+                    data=json.dumps({"video_md5": video_md5}).encode("utf-8"),
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )

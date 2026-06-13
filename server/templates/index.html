@@ -102,5 +102,61 @@ document.addEventListener('click', async function(e) {
         if (msgEl) msgEl.textContent = '\u670d\u52a1\u5668\u9519\u8bef: ' + err.message;
     }
 });
+
+// Video delete button handler (event delegation)
+document.addEventListener('click', async function(e) {
+    const btn = e.target.closest('.video-delete-btn');
+    if (!btn || btn.disabled) return;
+
+    const videoMd5 = btn.dataset.videoMd5;
+    const videoName = btn.parentElement.querySelector('a').textContent;
+    if (!confirm('确定要删除视频 ' + videoName + ' 及其所有关联数据吗？')) return;
+
+    btn.disabled = true;
+    btn.textContent = '...';
+    try {
+        const resp = await fetch('/api/videos/' + videoMd5 + '/delete', { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            location.reload();
+        } else {
+            alert(data.error || '删除失败');
+            btn.disabled = false;
+            btn.textContent = '删除';
+        }
+    } catch (err) {
+        alert('服务器错误: ' + err.message);
+        btn.disabled = false;
+        btn.textContent = '删除';
+    }
+});
+
+// Video redownload button handler (event delegation)
+document.addEventListener('click', async function(e) {
+    const btn = e.target.closest('.video-redownload-btn');
+    if (!btn || btn.disabled) return;
+
+    const videoMd5 = btn.dataset.videoMd5;
+    const videoName = btn.parentElement.querySelector('a').textContent;
+    if (!confirm('确定要重新下载视频 ' + videoName + ' 吗？这将删除现有文件并重新处理。')) return;
+
+    btn.disabled = true;
+    btn.textContent = '...';
+    try {
+        const resp = await fetch('/api/videos/' + videoMd5 + '/redownload', { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            location.reload();
+        } else {
+            alert(data.error || '重新下载失败');
+            btn.disabled = false;
+            btn.textContent = '重新下载';
+        }
+    } catch (err) {
+        alert('服务器错误: ' + err.message);
+        btn.disabled = false;
+        btn.textContent = '重新下载';
+    }
+});
 </script>
 </html>

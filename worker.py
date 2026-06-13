@@ -8,6 +8,7 @@ Progress is written to db/jobs.db (shared with the streaming server).
 """
 
 import json
+import hashlib
 import os
 import re
 import sqlite3
@@ -88,12 +89,16 @@ def _get_conn() -> sqlite3.Connection:
                 status TEXT NOT NULL DEFAULT 'in_progress',
                 progress TEXT DEFAULT '',
                 video_name TEXT DEFAULT '',
+                video_md5 TEXT DEFAULT '',
                 error TEXT DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
         """)
-        _conn.commit()
+        # Migrate: add video_md5 column if missing
+        cols = [row[1] for row in _conn.execute("PRAGMA table_info(jobs)").fetchall()]
+        if cols and "video_md5" not in cols:
+            _conn.execute("ALTER TABLE jobs ADD COLUMN video_md5 TEXT DEFAULT ''")
     return _conn
 
 
@@ -266,16 +271,16 @@ def _do_download(job_id: str, url: str) -> Path | None:
     if not srt_files:
         mp4_files = sorted(job_dir.glob("*.mp4"))
         vname = mp4_files[0].stem if mp4_files else ""
-        _update_job(job_id, stage="done", status="success", progress="", video_name=vname)
+        vmd5 = hashlib.md5(mp4_files[0].name.encode()).hexdigest()[:8] if mp4_files else ""
+        _update_job(job_id, stage="done", status="success", progress="", video_name=vname, video_md5=vmd5)
         for mp4 in mp4_files:
             mp4.replace(video_dir / mp4.name)
         return None
 
     mp4_files = sorted(job_dir.glob("*.mp4"))
     if mp4_files:
-        _update_job(job_id, video_name=mp4_files[0].stem)
-
-    return srt_files[0]
+        vmd5 = hashlib.md5(mp4_files[0].name.encode()).hexdigest()[:8]
+        _update_job(job_id, video_name=mp4_files[0].stem, video_md5=vmd5)
 
 
 def _do_punctuate(job_id: str, srt_path: Path) -> bool:
@@ -529,10 +534,36 @@ def _do_retry(job_id: str) -> None:
         _update_job(job_id, status="failed", error=f"retry error: {e}")
 
 
+
+def _cleanup_video_files(video_md5: str) -> bool:
+    """Delete matching MP4 + SRT files from video_dir and temp/<video_md5>/ cache.
+    Returns True if any files were deleted."""
+    deleted = False
+    video_dir = _video_dir()
+    video_dir_path = Path(video_dir)
+    _SUBTITLE_EXTS = {".srt", ".ass"}
+    if video_dir_path.is_dir():
+        for f in list(video_dir_path.iterdir()):
+            fname = f.name
+            f_md5 = hashlib.md5(fname.encode()).hexdigest()[:8]
+            if f_md5 == video_md5:
+                f.unlink(missing_ok=True)
+                deleted = True
+                stem = f.stem
+                for sub_f in list(video_dir_path.iterdir()):
+                    if sub_f.suffix.lower() in _SUBTITLE_EXTS and sub_f.stem == stem:
+                        sub_f.unlink(missing_ok=True)
+    temp_dir = _ROOT / "temp" / video_md5
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        deleted = True
+    return deleted
  # --- HTTP Server ---
 
 _DELETE_JOB_RE = re.compile(r"^/job/([a-f0-9]+)/delete$")
 _RETRY_JOB_RE = re.compile(r"^/job/([a-f0-9]+)/retry$")
+_VIDEO_DELETE_RE = re.compile(r"^/video/delete$")
+_VIDEO_REDOWNLOAD_RE = re.compile(r"^/video/redownload$")
 
 
 class WorkerHandler(BaseHTTPRequestHandler):
@@ -545,9 +576,20 @@ class WorkerHandler(BaseHTTPRequestHandler):
             self._handle_delete(m.group(1))
             return
 
+
         # Route: RETRY job
         if m := _RETRY_JOB_RE.match(self.path):
             self._handle_retry(m.group(1))
+            return
+
+        # Route: VIDEO delete
+        if m := _VIDEO_DELETE_RE.match(self.path):
+            self._handle_video_delete()
+            return
+
+        # Route: VIDEO redownload
+        if m := _VIDEO_REDOWNLOAD_RE.match(self.path):
+            self._handle_video_redownload()
             return
 
         # Route: create job
@@ -562,7 +604,6 @@ class WorkerHandler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, Exception):
             self._respond(400, {"error": "invalid JSON"})
             return
-
         url = data.get("url", "").strip()
         if not url:
             self._respond(400, {"error": "missing url"})
@@ -667,6 +708,120 @@ class WorkerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+
+    def _handle_video_delete(self) -> None:
+        """POST /video/delete — delete a video and all associated data."""
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length)
+            data = json.loads(body)
+        except (json.JSONDecodeError, Exception):
+            self._respond(400, {"error": "invalid JSON"})
+            return
+
+        video_md5 = data.get("video_md5", "").strip()
+        if not video_md5:
+            self._respond(400, {"error": "missing video_md5"})
+            return
+
+        video_dir = _video_dir()
+        deleted_any = False
+
+        # 1. Find matching jobs (not in_progress) and delete them
+        with _conn_lock:
+            conn = _get_conn()
+            rows = conn.execute(
+                "SELECT id FROM jobs WHERE video_md5 = ? AND status != 'in_progress'",
+                (video_md5,),
+            ).fetchall()
+
+        for (job_id,) in rows:
+            with _conn_lock:
+                conn = _get_conn()
+                cur = conn.execute(
+                    "UPDATE jobs SET status = 'in_progress' WHERE id = ? AND status != 'in_progress'",
+                    (job_id,),
+                )
+                conn.commit()
+                if cur.rowcount == 0:
+                    continue
+                conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+                conn.commit()
+            job_dir = _ROOT / "jobs" / job_id
+            shutil.rmtree(job_dir, ignore_errors=True)
+            deleted_any = True
+
+        # 2. Clean up video files and temp cache
+        if _cleanup_video_files(video_md5):
+            deleted_any = True
+
+        if not deleted_any:
+            self._respond(404, {"error": "no video found"})
+            return
+
+        self._respond(200, {"ok": True})
+
+    def _handle_video_redownload(self) -> None:
+        """POST /video/redownload — delete old data and re-trigger pipeline."""
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length)
+            data = json.loads(body)
+        except (json.JSONDecodeError, Exception):
+            self._respond(400, {"error": "invalid JSON"})
+            return
+
+        video_md5 = data.get("video_md5", "").strip()
+        if not video_md5:
+            self._respond(400, {"error": "missing video_md5"})
+            return
+
+        # 1. Find latest job by video_md5 (not in_progress)
+        with _conn_lock:
+            conn = _get_conn()
+            row = conn.execute(
+                "SELECT url, video_id FROM jobs WHERE video_md5 = ? AND status != 'in_progress' ORDER BY created_at DESC LIMIT 1",
+                (video_md5,),
+            ).fetchone()
+
+        if row is None:
+            self._respond(404, {"error": "no video record found for redownload"})
+            return
+
+        original_url, original_video_id = row
+
+        # 2. Claim and delete all matching jobs
+        with _conn_lock:
+            conn = _get_conn()
+            rows = conn.execute(
+                "SELECT id FROM jobs WHERE video_md5 = ? AND status != 'in_progress'",
+                (video_md5,),
+            ).fetchall()
+
+        for (job_id,) in rows:
+            with _conn_lock:
+                conn = _get_conn()
+                cur = conn.execute(
+                    "UPDATE jobs SET status = 'in_progress' WHERE id = ? AND status != 'in_progress'",
+                    (job_id,),
+                )
+                conn.commit()
+                if cur.rowcount == 0:
+                    continue
+                conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+                conn.commit()
+            job_dir = _ROOT / "jobs" / job_id
+            shutil.rmtree(job_dir, ignore_errors=True)
+
+        # 3. Clean up video files and temp cache
+        _cleanup_video_files(video_md5)
+
+        # 4. Create new job and start pipeline
+        job_id = _create_job(original_url, original_video_id)
+        thread = threading.Thread(target=_execute_pipeline, args=(job_id, original_url), daemon=True)
+        thread.start()
+
+        self._respond(200, {"ok": True})
 
 def main():
     _mark_interrupted()
