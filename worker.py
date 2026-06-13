@@ -282,6 +282,9 @@ def _do_download(job_id: str, url: str) -> Path | None:
         vmd5 = hashlib.md5(mp4_files[0].name.encode()).hexdigest()[:8]
         _update_job(job_id, video_name=mp4_files[0].stem, video_md5=vmd5)
 
+    return srt_files[0]
+
+
 
 def _do_punctuate(job_id: str, srt_path: Path) -> bool:
     """Punctuation check and DeepSeek chunk processing. Returns True on success."""
