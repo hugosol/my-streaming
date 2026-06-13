@@ -6,3 +6,4 @@ temp/
 .idea/
 jobs/
 db/
+config.json
