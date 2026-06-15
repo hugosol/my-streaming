@@ -1,4 +1,5 @@
 @echo off
+title My Streaming Server
 echo Starting My Streaming...
 echo.
 
@@ -16,5 +17,12 @@ REM Start streaming server (pass video dir from config if specified)
 %PYTHON% server.py %*
 
 echo.
-echo Server and worker started. Press Ctrl+C to stop.
-pause
+echo Server and worker started. Run shutdown-all.bat to stop.
+echo.
+:wait_shutdown
+if exist "%TEMP%\mystreaming_shutdown" (
+    del "%TEMP%\mystreaming_shutdown"
+    goto :eof
+)
+timeout /t 2 /nobreak >nul
+goto :wait_shutdown
