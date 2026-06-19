@@ -414,7 +414,7 @@ def _do_finalize(job_id: str, srt_path: Path) -> bool:
     if mp4_files:
         video_name = mp4_files[0].name
 
-    _update_job(job_id, stage="done", status="success", progress="", video_name=video_name)
+    _update_job(job_id, stage="done", status="success", progress="", error="", video_name=video_name)
     shutil.rmtree(job_dir, ignore_errors=True)
     return True
 
@@ -480,9 +480,11 @@ def _do_retry(job_id: str) -> None:
             failed_indices.append(cf)
 
         if A != A_actual:
-            _update_job(job_id, status="failed",
-                        error=f"retry: A mismatch (DB={A}, actual={A_actual})")
-            return
+            # DB progress can over-count when translate_chunk accepted a chunk
+            # with blank output lines (now fixed). Treat actual as authoritative.
+            print(f"[RETRY] A mismatch corrected: DB={A}, actual={A_actual}")
+            A = A_actual
+            _update_job(job_id, progress=f"{A}/{B}")
 
         # 4. Delete failed _chinese.txt files
         for cf in failed_indices:

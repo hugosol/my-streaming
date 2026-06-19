@@ -31,7 +31,10 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
 
     input_text = chunk_path.read_text(encoding="utf-8")
     input_lines = input_text.strip().split("\n")
-    input_line_count = len(input_lines)
+    # Filter blank lines — an empty translation line is useless and would
+    # cause validation mismatch with retry (which also filters blanks).
+    input_non_empty = [l for l in input_lines if l.strip()]
+    input_line_count = len(input_non_empty)
 
     # Build numbered input text for attempt 2 (line-by-line fallback)
     numbered_lines = [f"[{i + 1}] {line}" for i, line in enumerate(input_lines)]
@@ -68,11 +71,12 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
         f"{numbered_text}",
     ]
 
-    max_retries = min(len(prompts), 3)
+    max_retries = 3
     start_time = time.time()
     last_error = ""
 
-    for attempt, prompt in enumerate(prompts):
+    for attempt in range(max_retries):
+        prompt = prompts[attempt % len(prompts)]  # cycle through prompts on retry
         try:
             result = call_skill(
                 skill_name="chunk-translator",
@@ -93,7 +97,7 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
                 return False, last_error
             continue
 
-        # Attempt 2: strip [N] prefixes from numbered output
+        # Strip [N] prefixes when using the numbered prompt (index 1 in cycle)
         if attempt == 1:
             raw_lines = result.strip().split("\n")
             stripped = []
@@ -109,7 +113,8 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
                 result = "\n".join(stripped)
 
         output_lines = result.strip().split("\n")
-        output_line_count = len(output_lines)
+        output_non_empty = [l for l in output_lines if l.strip()]
+        output_line_count = len(output_non_empty)
 
         if output_line_count == input_line_count:
             output_path.write_text(result, encoding="utf-8")
