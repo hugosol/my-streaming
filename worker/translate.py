@@ -167,9 +167,11 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
         # Strip markdown code fences and LLM preamble
         result = _strip_fences_and_preamble(result)
 
-        # Strip [N] prefixes when using the numbered prompt (index 1 in cycle)
-        if attempt == 1:
-            raw_lines = result.strip().split("\n")
+        # Strip [N] prefixes whenever output uses numbered format.
+        # (Detect by content, not by which attempt it was — LLMs may
+        #  add numbering even on the non-numbered prompt.)
+        raw_lines = result.strip().split("\n")
+        if all(re.match(r"\[\d+\]", l.strip()) for l in raw_lines if l.strip()):
             stripped = []
             for line in raw_lines:
                 line = line.strip()
@@ -178,9 +180,7 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
                     stripped.append(m.group(1))
                 else:
                     stripped.append(line)
-            # Check if numbered format was used; if all lines had prefixes, use stripped version
-            if all(re.match(r"\[\d+\]", l.strip()) for l in raw_lines if l.strip()):
-                result = "\n".join(stripped)
+            result = "\n".join(stripped)
 
         output_lines = result.strip().split("\n")
         output_non_empty = [l for l in output_lines if l.strip()]
