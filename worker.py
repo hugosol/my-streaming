@@ -464,6 +464,8 @@ def _do_retry(job_id: str) -> None:
             return
 
         # 3. Count successful chunks (chinese.txt exists + line count matches)
+        #    Use the same fence-stripping logic as translate_chunk for consistency.
+        from worker.translate import _strip_fences_and_preamble
         A_actual = 0
         failed_indices = []
         for cf in chunk_files:
@@ -471,7 +473,9 @@ def _do_retry(job_id: str) -> None:
             if chinese.exists():
                 try:
                     src_lines = len([l for l in cf.read_text(encoding="utf-8").split("\n") if l.strip()])
-                    out_lines = len([l for l in chinese.read_text(encoding="utf-8").split("\n") if l.strip()])
+                    cn_text = chinese.read_text(encoding="utf-8")
+                    cn_clean = _strip_fences_and_preamble(cn_text)
+                    out_lines = len([l for l in cn_clean.strip().split("\n") if l.strip()])
                     if src_lines == out_lines:
                         A_actual += 1
                         continue

@@ -14,6 +14,46 @@ _PROJECT_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 
+def _strip_fences_and_preamble(text: str) -> str:
+    """Remove markdown code fences and LLM preamble from translation output.
+
+    Defends against LLMs that wrap output in ```text ... ``` or prefix it
+    with a "plan" preamble like "好的，我将严格遵循...". Strips everything
+    outside the fence pair and leading/trailing blank lines.
+    """
+    lines = text.split("\n")
+
+    # Find opening fence line (```, ```text, ```language)
+    fence_open: int | None = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith("```"):
+            fence_open = i
+            break
+
+    # Find closing fence line (```)
+    fence_close: int | None = None
+    if fence_open is not None:
+        for i in range(len(lines) - 1, fence_open, -1):
+            if lines[i].strip() == "```":
+                fence_close = i
+                break
+
+    # If we have a valid fence pair, keep only content between them
+    if fence_open is not None and fence_close is not None and fence_close > fence_open:
+        lines = lines[fence_open + 1 : fence_close]
+    elif fence_open is not None:
+        # Opening fence without closing: discard everything up to the fence
+        lines = lines[fence_open + 1:]
+
+    # Strip leading/trailing blank lines
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    return "\n".join(lines)
+
+
 def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
     """Translate a single chunk via DeepSeek API with line-count validation.
 
@@ -48,7 +88,9 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
         f"1. 输出恰好 {input_line_count} 行，一行不多、一行不少\n"
         f"2. 每行中文对应同位置的一行英文\n"
         f"3. 不要在行内使用换行符\n"
-        f"4. 不要在输出中添加序号、标记或任何额外内容\n\n"
+        f"4. 不要在输出中添加序号、标记或任何额外内容\n"
+        f"5. 不要用代码围栏（```）包裹输出\n"
+        f"6. 不要添加任何前言、计划说明、总结或解释\n\n"
         f"宁可拆分不自然、宁可每行不是完整句子，也必须保证恰好 {input_line_count} 行。\n\n"
         f"{input_text}",
 
@@ -96,6 +138,9 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
             if attempt + 1 >= max_retries:
                 return False, last_error
             continue
+
+        # Strip markdown code fences and LLM preamble
+        result = _strip_fences_and_preamble(result)
 
         # Strip [N] prefixes when using the numbered prompt (index 1 in cycle)
         if attempt == 1:
