@@ -17,33 +17,58 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 def _strip_fences_and_preamble(text: str) -> str:
     """Remove markdown code fences and LLM preamble from translation output.
 
-    Defends against LLMs that wrap output in ```text ... ``` or prefix it
-    with a "plan" preamble like "好的，我将严格遵循...". Strips everything
-    outside the fence pair and leading/trailing blank lines.
+    Defends against LLMs that:
+    - Wrap output in ```text ... ```
+    - Prefix with a "plan" preamble like "好的，我将严格遵循..."
+    - Wrap English original in fences and put Chinese translation outside
+      (common failure mode: first fence pair = echoed English, real
+      translation follows after the closing fence).
+
+    Strategy: strip fence markers, detect and remove preamble lines,
+    then prefer content after the last fence if multiple fence pairs exist.
     """
     lines = text.split("\n")
 
-    # Find opening fence line (```, ```text, ```language)
-    fence_open: int | None = None
-    for i, line in enumerate(lines):
-        if line.strip().startswith("```"):
-            fence_open = i
+    # Collect fence line indices (```, ```text, ```language)
+    fence_indices = [
+        i for i, line in enumerate(lines)
+        if re.match(r'^\s*```', line.strip())
+    ]
+
+    if fence_indices:
+        # If content exists after the last fence, prefer it — the earlier
+        # fence pair may be the LLM echoing English original.
+        last_close = fence_indices[-1]
+        after_last = lines[last_close + 1:]
+        # Also collect content between the last open-close pair if balanced
+        if len(fence_indices) >= 2:
+            # Last pair: second-to-last is likely open, last is close
+            penultimate = fence_indices[-2]
+            between = lines[penultimate + 1 : last_close]
+            # Prefer content after last fence if non-empty, else between last pair
+            after_non_empty = [l for l in after_last if l.strip()]
+            if after_non_empty:
+                lines = after_last
+            else:
+                lines = between
+        else:
+            # Single fence marker: discard everything before it
+            lines = lines[fence_indices[0] + 1:]
+
+    # Strip preamble lines (common Chinese LLM preamble patterns).
+    # Limit to first 2 lines to avoid stripping legitimate translations
+    # that happen to start with preamble-like phrases.
+    _preamble_re = re.compile(
+        r'^(好的[，,、]|以下是|以下为|翻译结果|这是翻译|根据.*翻译|'
+        r'我将|现在开始|下面是|以下是对|OK|Here|Let\s|I\s|The\s)'
+    )
+    _stripped = 0
+    while lines and lines[0].strip() and _stripped < 2:
+        if _preamble_re.match(lines[0].strip()):
+            lines.pop(0)
+            _stripped += 1
+        else:
             break
-
-    # Find closing fence line (```)
-    fence_close: int | None = None
-    if fence_open is not None:
-        for i in range(len(lines) - 1, fence_open, -1):
-            if lines[i].strip() == "```":
-                fence_close = i
-                break
-
-    # If we have a valid fence pair, keep only content between them
-    if fence_open is not None and fence_close is not None and fence_close > fence_open:
-        lines = lines[fence_open + 1 : fence_close]
-    elif fence_open is not None:
-        # Opening fence without closing: discard everything up to the fence
-        lines = lines[fence_open + 1:]
 
     # Strip leading/trailing blank lines
     while lines and not lines[0].strip():
@@ -162,6 +187,16 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
         output_line_count = len(output_non_empty)
 
         if output_line_count == input_line_count:
+            # Guard: if output has very few Chinese characters, it's likely
+            # an English echo (LLM returned input verbatim). Retry.
+            _chinese_chars = sum(1 for c in result if '\u4e00' <= c <= '\u9fff')
+            _total_chars = max(len(result.strip()), 1)
+            _chinese_ratio = _chinese_chars / _total_chars
+            if _chinese_ratio < 0.03 and input_line_count > 5:
+                last_error = f"Low Chinese ratio ({_chinese_ratio:.3f}), likely English echo"
+                print(f"[TRANSLATE] {last_error} (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                continue
+
             output_path.write_text(result, encoding="utf-8")
             elapsed = time.time() - start_time
             extra = f" (retry {attempt})" if attempt > 0 else ""

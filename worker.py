@@ -463,7 +463,7 @@ def _do_retry(job_id: str) -> None:
                         error=f"retry: B mismatch (DB={B}, actual={B_actual})")
             return
 
-        # 3. Count successful chunks (chinese.txt exists + line count matches)
+        # 3. Count successful chunks (chinese.txt exists + line count matches + Chinese ratio check)
         #    Use the same fence-stripping logic as translate_chunk for consistency.
         from worker.translate import _strip_fences_and_preamble
         A_actual = 0
@@ -477,8 +477,13 @@ def _do_retry(job_id: str) -> None:
                     cn_clean = _strip_fences_and_preamble(cn_text)
                     out_lines = len([l for l in cn_clean.strip().split("\n") if l.strip()])
                     if src_lines == out_lines:
-                        A_actual += 1
-                        continue
+                        # Guard: check Chinese character ratio to catch English echo
+                        _ch_chars = sum(1 for c in cn_clean if '\u4e00' <= c <= '\u9fff')
+                        _total = max(len(cn_clean.strip()), 1)
+                        _ratio = _ch_chars / _total
+                        if _ratio >= 0.03 or src_lines <= 5:
+                            A_actual += 1
+                            continue
                 except Exception:
                     pass
             failed_indices.append(cf)
