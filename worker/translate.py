@@ -101,32 +101,20 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
     input_non_empty = [l for l in input_lines if l.strip()]
     input_line_count = len(input_non_empty)
 
-    # Build numbered input text for attempt 2 (line-by-line fallback)
+    # Build numbered input text for attempt 1 (line-by-line, primary)
     numbered_lines = [f"[{i + 1}] {line}" for i, line in enumerate(input_lines)]
     numbered_text = "\n".join(numbered_lines)
 
     prompts = [
-        # Attempt 1: 整体翻译 + 强制行数约束
-        f"【最高优先级：行数必须等于 {input_line_count}】\n\n"
-        f"翻译以下英文文本为中文。\n\n"
-        f"硬性要求（违反即为失败）：\n"
-        f"1. 输出恰好 {input_line_count} 行，一行不多、一行不少\n"
-        f"2. 每行中文对应同位置的一行英文\n"
-        f"3. 不要在行内使用换行符\n"
-        f"4. 不要在输出中添加序号、标记或任何额外内容\n"
-        f"5. 不要用代码围栏（```）包裹输出\n"
-        f"6. 不要添加任何前言、计划说明、总结或解释\n\n"
-        f"宁可拆分不自然、宁可每行不是完整句子，也必须保证恰好 {input_line_count} 行。\n\n"
-        f"{input_text}",
-
-        # Attempt 2: 逐行编号翻译（回退方案，更可靠）
+        # Attempt 1: 逐行编号翻译（首选方案，保证1:1行对齐）
         f"【逐行翻译模式 — 必须严格遵守格式】\n\n"
         f"下面有 {input_line_count} 行英文，每行以 [行号] 开头。\n"
         f"请逐行翻译为中文，输出格式必须与输入格式完全对应。\n\n"
         f"格式规则（缺一不可）：\n"
         f"- 输出恰好 {input_line_count} 行\n"
         f"- 每行以 [行号] 开头，后面紧跟该行的中文翻译\n"
-        f"- 行号从 1 到 {input_line_count}，连续不跳号\n"
+        f"- 行号从 1 到 {input_line_count}，连续不跳号，不重复\n"
+        f"- 禁止将多行英文合并为一行中文输出\n"
         f"- [行号] 和中文之间用一个空格分隔\n"
         f"- 不输出英文原文，只输出 [行号] + 中文\n"
         f"- 不添加任何解释、汇总或其他内容\n\n"
@@ -134,8 +122,34 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
         f"[1] 你好世界\n"
         f"[2] 这是第二行\n"
         f"[3] 这是第三行\n\n"
-        f"现在开始翻译以下 {input_line_count} 行：\n\n"
+        f"现在开始逐行翻译，严格保持 {input_line_count} 行输出：\n\n"
         f"{numbered_text}",
+
+        # Attempt 2: 逐行编号翻译变体（强化约束）
+        f"【严谨逐行翻译 — 每一行独立处理】\n\n"
+        f"你有 {input_line_count} 个独立的翻译任务，每个任务对应一行英文。\n"
+        f"每一行必须单独翻译，不允许合并或跳过任何一行。\n\n"
+        f"输出格式：\n"
+        f"[行号] 该行的中文翻译\n\n"
+        f"约束：\n"
+        f"- 输出恰好 {input_line_count} 行，一行对应一个输入行\n"
+        f"- 行号 1..{input_line_count}，每个行号出现恰好一次\n"
+        f"- 不输出任何其他内容（无前言、无总结、无注释）\n"
+        f"- 即使某行是不完整的英文片段，也必须逐字翻译，不要补充或合并\n\n"
+        f"输入：\n{numbered_text}",
+
+        # Attempt 3: 整体翻译 + 强制行数约束（最后回退）
+        f"【最高优先级：行数必须等于 {input_line_count}】\n\n"
+        f"翻译以下英文文本为中文。\n\n"
+        f"硬性要求（违反即为失败）：\n"
+        f"1. 输出恰好 {input_line_count} 行，一行不多、一行不少\n"
+        f"2. 每行中文对应同位置的一行英文，禁止合并或拆分\n"
+        f"3. 不要在行内使用换行符\n"
+        f"4. 不要在输出中添加序号、标记或任何额外内容\n"
+        f"5. 不要用代码围栏（```）包裹输出\n"
+        f"6. 不要添加任何前言、计划说明、总结或解释\n\n"
+        f"宁可拆分不自然、宁可每行不是完整句子，也必须保证恰好 {input_line_count} 行。\n\n"
+        f"{input_text}",
     ]
 
     max_retries = 3
@@ -195,6 +209,23 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
             if _chinese_ratio < 0.03 and input_line_count > 5:
                 last_error = f"Low Chinese ratio ({_chinese_ratio:.3f}), likely English echo"
                 print(f"[TRANSLATE] {last_error} (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                continue
+
+            # Guard 2: merge detection — if any output line is >4x the byte
+            # length of its input line (and the input is not trivially short),
+            # the LLM likely merged two lines (common with sentence fragments
+            # split across SRT blocks).
+            _merge_suspected = False
+            for _i in range(input_line_count):
+                _in_len = len(input_non_empty[_i].encode('utf-8'))
+                _out_len = len(output_non_empty[_i].encode('utf-8'))
+                if _in_len >= 10 and _out_len > _in_len * 4:
+                    _merge_suspected = True
+                    print(f"[TRANSLATE] Merge suspected: line {_i+1} in={_in_len}B out={_out_len}B "
+                          f"(attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                    break
+            if _merge_suspected:
+                last_error = "Merge detected: output line much longer than input"
                 continue
 
             output_path.write_text(result, encoding="utf-8")
