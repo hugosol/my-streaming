@@ -39,18 +39,28 @@ _Avoid_: Phase、步骤
 Job 的进行/终态，只取三个值：`in_progress`（进行中）、`success`（成功）、`failed`（失败）。
 
 **Progress**:
-翻译阶段内的进度，格式 `A/B`，A 为已完成的 chunk 数，B 为总 chunk 数。其他阶段为空。
+标点和翻译阶段内的进度，格式 `A/B`，A 为已完成的分块数，B 为总分块数。其他阶段为空。
 _Avoid_: 完成度、百分比
 
 ### 翻译子概念
 
-**Chunk**:
-字幕文本按约 100 行切分的翻译单元。每个 chunk 对应两个文件：`chunk_NNN.txt`（英文原文）和 `chunk_NNN_chinese.txt`（中文翻译结果）。
-_Avoid_: 分块、片段
+**Translation Chunk**:
+字幕文本按约 100 行切分的翻译单元。每个 Translation Chunk 对应两个文件：`chunk_NNN.txt`（英文原文）和 `chunk_NNN_chinese.txt`（中文翻译结果）。
+_Avoid_: 分块、片段、Chunk
 
 **Workspace**:
 翻译阶段的中间产物目录，位于 `jobs/<job_id>/<srt_stem>_workspace/`，包含 chunks 子目录和聚合后的文本文件。
 _Avoid_: 工作区、临时目录
+
+### 标点子概念
+
+**Punctuation Chunk**:
+标点阶段由 `srt_marker.py` 切分出的处理单元，最多包含 50 条字幕。每个 Punctuation Chunk 对应两个文件：`chunk_NNN.txt`（英文原文）和 `chunk_NNN_punctuated.txt`（加标点结果）。
+_Avoid_: 标点块、片段、Chunk
+
+**Punctuation Work Directory**:
+标点阶段的中间产物目录，位于 `jobs/<job_id>/<srt_stem>.punc_work/`，包含 `chunks/` 子目录和 `chunks.json` 清单。
+_Avoid_: 标点工作区、临时目录
 
 ### 输出产物
 

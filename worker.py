@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 import shutil
@@ -334,17 +335,44 @@ def _do_punctuate(job_id: str, srt_path: Path) -> bool:
     total_chunks = chunks_data.get("total_chunks", 0)
     chunks_dir = chunks_json.parent / "chunks"
 
+    tasks = []
     for i in range(total_chunks):
         chunk_file = chunks_dir / f"chunk_{i:03d}.txt"
         output_file = chunks_dir / f"chunk_{i:03d}_punctuated.txt"
         if not chunk_file.exists():
             _update_job(job_id, status="failed", error=f"缺少chunk文件: {chunk_file.name}")
             return False
-        _update_job(job_id, progress=f"{i + 1}/{total_chunks}")
-        ok, err_msg = _run_punctuate_chunk(chunk_file, output_file)
-        if not ok:
-            _update_job(job_id, status="failed", error=f"标点处理失败 (chunk {i + 1}/{total_chunks}): {err_msg}")
-            return False
+        tasks.append((i + 1, chunk_file, output_file))
+
+    if tasks:
+        thread_num = _load_config().get("punctuation", {}).get("thread_num", 4)
+        _update_job(job_id, progress=f"0/{total_chunks}")
+        executor = ThreadPoolExecutor(max_workers=thread_num)
+        futures = {}
+        try:
+            for idx, chunk_file, output_file in tasks:
+                future = executor.submit(_run_punctuate_chunk, chunk_file, output_file)
+                futures[future] = idx
+
+            completed = 0
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    ok, err_msg = future.result()
+                except Exception as e:
+                    ok, err_msg = False, str(e)
+                if ok:
+                    completed += 1
+                    _update_job(job_id, progress=f"{completed}/{total_chunks}")
+                else:
+                    for pending in futures:
+                        if not pending.done():
+                            pending.cancel()
+                    _update_job(job_id, status="failed",
+                                error=f"标点处理失败 (chunk {idx}/{total_chunks}): {err_msg}")
+                    return False
+        finally:
+            executor.shutdown(wait=False)
 
     punc_work_dir = job_dir / f"{srt_path.stem}.punc_work"
     rc = _run_subprocess(

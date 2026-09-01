@@ -15,6 +15,9 @@
     "max_size": 100,
     "thread_num": 4
   },
+  "punctuation": {
+    "thread_num": 4
+  },
   "punctuation_check": {
     "expected_per_lines": 0.333,
     "threshold_factor": 0.4
