@@ -14,6 +14,135 @@ _PROJECT_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 
+# A sentence group ends when an English line ends with sentence-final
+# punctuation.  These may be followed by a closing quote/paren.
+_SENTENCE_END_RE = re.compile(r'[.!?…][”\'"）)]?$')
+
+
+def split_english_groups(lines: list[str]) -> list[list[str]]:
+    """Split non-empty English lines into sentence groups.
+
+    A new group begins after a line ending with sentence-final punctuation.
+    Consecutive lines that do not end a sentence stay in the same group, so a
+    sentence split over multiple SRT blocks is translated as one unit.
+    """
+    groups: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+        current.append(s)
+        if _SENTENCE_END_RE.search(s):
+            groups.append(current)
+            current = []
+    if current:
+        groups.append(current)
+    return groups
+
+
+def split_translation_groups(text: str) -> list[list[str]]:
+    """Parse LLM translation output into groups separated by blank lines.
+
+    Also tolerates common LLM decorations: [1] line numbers, group labels
+    such as 【组1】, and runs of dashes/equals used as separators.
+    """
+    raw_lines = text.split("\n")
+    groups: list[list[str]] = []
+    current: list[str] = []
+
+    def _clean(line: str) -> str:
+        s = line.strip()
+        # Remove per-line numbering if the model added it.
+        m = re.match(r'^\[\d+\]\s*(.*)$', s)
+        if m:
+            s = m.group(1).strip()
+        # Remove a standalone/leading group label.
+        s = re.sub(
+            r'^(?:【|\[)?\s*(?:组|GROUP|Group)\s*\d+\s*[】\]]?\s*[:：]?\s*',
+            '', s
+        ).strip()
+        return s
+
+    for line in raw_lines:
+        s = line.strip()
+        if not s or re.match(r'^[\-=*]{3,}$', s):
+            if current:
+                groups.append(current)
+                current = []
+            continue
+        cleaned = _clean(line)
+        if not cleaned:
+            continue
+        current.append(cleaned)
+
+    if current:
+        groups.append(current)
+    return groups
+
+
+def write_flat_lines(path: Path, lines: list[str]) -> None:
+    """Write one flat line per SRT block, preserving blank placeholder rows.
+
+    A trailing blank row must survive PowerShell's Get-Content, so the file is
+    written with one final newline; two newlines at the end represent a real
+    trailing blank row.
+    """
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def read_flat_lines(text: str) -> list[str]:
+    """Read the flat representation written by write_flat_lines."""
+    if text == "":
+        return []
+    lines = text.split("\n")
+    if text.endswith("\n"):
+        lines.pop()
+    return lines
+
+
+def _format_grouped_input(groups: list[list[str]]) -> str:
+    parts = []
+    for i, group in enumerate(groups, 1):
+        parts.append(f"【组{i}】\n" + "\n".join(group))
+    return "\n\n".join(parts)
+
+
+def _build_prompts(input_groups: list[list[str]]) -> list[str]:
+    group_count = len(input_groups)
+    formatted = _format_grouped_input(input_groups)
+
+    contract = (
+        f"输出 {group_count} 个中文组，组间用空行分隔。\n"
+        "第 i 个中文组只对应第 i 个英文句组，内容留在本组内。\n"
+        "中文组行数可以少于英文组；短是正常的，后续合并会补空行。\n"
+        "每个中文组至少 1 行，最多与对应英文组行数相同，通常更少。\n"
+        "只输出中文翻译行，不加编号、标题、英文原文或解释。"
+    )
+
+    return [
+        # Attempt 1: natural group-by-group translation (primary).
+        f"【按句组翻译】\n\n"
+        f"下面有 {group_count} 个英文句组。每个组里的多行英文是同一句话被时间轴拆开的片段，"
+        f"请先读完整个组，再整体翻译成自然中文。\n\n"
+        f"{contract}\n\n"
+        f"输入：\n{formatted}",
+
+        # Attempt 2: same contract, with the group boundary as the anchor.
+        f"【句组边界优先】\n\n"
+        f"{group_count} 个英文句组，每个组是一个独立语义单元。\n\n"
+        f"{contract}\n\n"
+        f"翻译时以句组为边界，组内断句自然即可。\n\n"
+        f"输入：\n{formatted}",
+
+        # Attempt 3: concise fallback.
+        f"【译句组】\n\n"
+        f"{contract}\n\n"
+        f"翻译以下 {group_count} 个英文句组：\n\n"
+        f"{formatted}",
+    ]
+
+
 def _strip_fences_and_preamble(text: str) -> str:
     """Remove markdown code fences and LLM preamble from translation output.
 
@@ -80,10 +209,12 @@ def _strip_fences_and_preamble(text: str) -> str:
 
 
 def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
-    """Translate a single chunk via DeepSeek API with line-count validation.
+    """Translate a single chunk via DeepSeek API with sentence-group alignment.
 
-    Reads chunk_path (English text), calls chunk-translator skill,
-    writes Chinese output to output_path. Retries once on line mismatch.
+    English lines are grouped into sentence units before prompting.  Each
+    English group is translated as one unit; the Chinese output may have fewer
+    lines than the English group.  Missing lines are written as blank lines,
+    so the next group's translation cannot shift up by one subtitle row.
 
     Returns (True, "") on success, (False, error_reason) on failure.
     """
@@ -95,69 +226,24 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
         return False, msg
 
     input_text = chunk_path.read_text(encoding="utf-8")
-    input_lines = input_text.strip().split("\n")
-    # Filter blank lines — an empty translation line is useless and would
-    # cause validation mismatch with retry (which also filters blanks).
+    input_lines = input_text.split("\n")
     input_non_empty = [l for l in input_lines if l.strip()]
     input_line_count = len(input_non_empty)
 
-    # Build numbered input text for attempt 1 (line-by-line, primary)
-    numbered_lines = [f"[{i + 1}] {line}" for i, line in enumerate(input_lines)]
-    numbered_text = "\n".join(numbered_lines)
+    # Group the flat extracted subtitle lines into sentence units.
+    input_groups = split_english_groups(input_non_empty)
+    group_count = len(input_groups)
+    if group_count == 0:
+        return False, "Empty input chunk"
 
-    prompts = [
-        # Attempt 1: 逐行编号翻译（首选方案，保证1:1行对齐）
-        f"【逐行翻译模式 — 必须严格遵守格式】\n\n"
-        f"下面有 {input_line_count} 行英文，每行以 [行号] 开头。\n"
-        f"请逐行翻译为中文，输出格式必须与输入格式完全对应。\n\n"
-        f"格式规则（缺一不可）：\n"
-        f"- 输出恰好 {input_line_count} 行\n"
-        f"- 每行以 [行号] 开头，后面紧跟该行的中文翻译\n"
-        f"- 行号从 1 到 {input_line_count}，连续不跳号，不重复\n"
-        f"- 禁止将多行英文合并为一行中文输出\n"
-        f"- [行号] 和中文之间用一个空格分隔\n"
-        f"- 不输出英文原文，只输出 [行号] + 中文\n"
-        f"- 不添加任何解释、汇总或其他内容\n\n"
-        f"示例（如果输入有3行）：\n"
-        f"[1] 你好世界\n"
-        f"[2] 这是第二行\n"
-        f"[3] 这是第三行\n\n"
-        f"现在开始逐行翻译，严格保持 {input_line_count} 行输出：\n\n"
-        f"{numbered_text}",
-
-        # Attempt 2: 逐行编号翻译变体（强化约束）
-        f"【严谨逐行翻译 — 每一行独立处理】\n\n"
-        f"你有 {input_line_count} 个独立的翻译任务，每个任务对应一行英文。\n"
-        f"每一行必须单独翻译，不允许合并或跳过任何一行。\n\n"
-        f"输出格式：\n"
-        f"[行号] 该行的中文翻译\n\n"
-        f"约束：\n"
-        f"- 输出恰好 {input_line_count} 行，一行对应一个输入行\n"
-        f"- 行号 1..{input_line_count}，每个行号出现恰好一次\n"
-        f"- 不输出任何其他内容（无前言、无总结、无注释）\n"
-        f"- 即使某行是不完整的英文片段，也必须逐字翻译，不要补充或合并\n\n"
-        f"输入：\n{numbered_text}",
-
-        # Attempt 3: 整体翻译 + 强制行数约束（最后回退）
-        f"【最高优先级：行数必须等于 {input_line_count}】\n\n"
-        f"翻译以下英文文本为中文。\n\n"
-        f"硬性要求（违反即为失败）：\n"
-        f"1. 输出恰好 {input_line_count} 行，一行不多、一行不少\n"
-        f"2. 每行中文对应同位置的一行英文，禁止合并或拆分\n"
-        f"3. 不要在行内使用换行符\n"
-        f"4. 不要在输出中添加序号、标记或任何额外内容\n"
-        f"5. 不要用代码围栏（```）包裹输出\n"
-        f"6. 不要添加任何前言、计划说明、总结或解释\n\n"
-        f"宁可拆分不自然、宁可每行不是完整句子，也必须保证恰好 {input_line_count} 行。\n\n"
-        f"{input_text}",
-    ]
+    prompts = _build_prompts(input_groups)
 
     max_retries = 3
     start_time = time.time()
     last_error = ""
 
     for attempt in range(max_retries):
-        prompt = prompts[attempt % len(prompts)]  # cycle through prompts on retry
+        prompt = prompts[attempt % len(prompts)]
         try:
             result = call_skill(
                 skill_name="chunk-translator",
@@ -178,64 +264,64 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
                 return False, last_error
             continue
 
-        # Strip markdown code fences and LLM preamble
         result = _strip_fences_and_preamble(result)
 
-        # Strip [N] prefixes whenever output uses numbered format.
-        # (Detect by content, not by which attempt it was — LLMs may
-        #  add numbering even on the non-numbered prompt.)
-        raw_lines = result.strip().split("\n")
-        if all(re.match(r"\[\d+\]", l.strip()) for l in raw_lines if l.strip()):
-            stripped = []
-            for line in raw_lines:
-                line = line.strip()
-                m = re.match(r"\[\d+\]\s*(.*)", line)
-                if m:
-                    stripped.append(m.group(1))
-                else:
-                    stripped.append(line)
-            result = "\n".join(stripped)
+        output_groups = split_translation_groups(result)
 
-        output_lines = result.strip().split("\n")
-        output_non_empty = [l for l in output_lines if l.strip()]
-        output_line_count = len(output_non_empty)
-
-        if output_line_count == input_line_count:
-            # Guard: if output has very few Chinese characters, it's likely
-            # an English echo (LLM returned input verbatim). Retry.
-            _chinese_chars = sum(1 for c in result if '\u4e00' <= c <= '\u9fff')
-            _total_chars = max(len(result.strip()), 1)
-            _chinese_ratio = _chinese_chars / _total_chars
-            if _chinese_ratio < 0.03 and input_line_count > 5:
-                last_error = f"Low Chinese ratio ({_chinese_ratio:.3f}), likely English echo"
-                print(f"[TRANSLATE] {last_error} (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
-                continue
-
-            # Guard 2: merge detection — if any output line is >4x the byte
-            # length of its input line (and the input is not trivially short),
-            # the LLM likely merged two lines (common with sentence fragments
-            # split across SRT blocks).
-            _merge_suspected = False
-            for _i in range(input_line_count):
-                _in_len = len(input_non_empty[_i].encode('utf-8'))
-                _out_len = len(output_non_empty[_i].encode('utf-8'))
-                if _in_len >= 10 and _out_len > _in_len * 4:
-                    _merge_suspected = True
-                    print(f"[TRANSLATE] Merge suspected: line {_i+1} in={_in_len}B out={_out_len}B "
-                          f"(attempt {attempt + 1}/{max_retries})", file=sys.stderr)
-                    break
-            if _merge_suspected:
-                last_error = "Merge detected: output line much longer than input"
-                continue
-
-            output_path.write_text(result, encoding="utf-8")
-            elapsed = time.time() - start_time
-            extra = f" (retry {attempt})" if attempt > 0 else ""
-            print(f"[TRANSLATE] OK {chunk_path.name} -> {output_path.name} ({elapsed:.1f}s, {input_line_count} lines){extra}")
-            return True, ""
-        else:
-            last_error = f"Line mismatch: expected {input_line_count}, got {output_line_count}"
+        if len(output_groups) != group_count:
+            last_error = (
+                f"Group mismatch: expected {group_count} sentence groups, "
+                f"got {len(output_groups)}"
+            )
             print(f"[TRANSLATE] {last_error} (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+            continue
+
+        # Expand each Chinese group back to one line per English SRT block.
+        # If Chinese has fewer lines than English, pad with blank lines at the
+        # TOP of the group so the Chinese lines sit under the later English
+        # rows.  This keeps the short Chinese translation aligned with the end
+        # of the English sentence and prevents the next group from shifting.
+        flat_lines: list[str] = []
+        alignment_error = ""
+        for gi, (in_group, out_group) in enumerate(zip(input_groups, output_groups), 1):
+            n = len(in_group)
+            m = len(out_group)
+            if m == 0:
+                alignment_error = f"Empty translation for group {gi}"
+                break
+            if m > n:
+                alignment_error = (
+                    f"Group {gi} has {m} Chinese lines but only {n} English lines; "
+                    f"refusing to shift rows"
+                )
+                break
+            flat_lines.extend([""] * (n - m))
+            flat_lines.extend(out_group)
+
+        if alignment_error:
+            last_error = alignment_error
+            print(f"[TRANSLATE] {last_error} (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+            continue
+
+        # Guard: very low Chinese ratio is usually an English echo.
+        _non_empty = [l for l in flat_lines if l.strip()]
+        _chinese_chars = sum(1 for c in result if '\u4e00' <= c <= '\u9fff')
+        _total_chars = max(len(result.strip()), 1)
+        _chinese_ratio = _chinese_chars / _total_chars
+        if _chinese_ratio < 0.03 and input_line_count > 5:
+            last_error = f"Low Chinese ratio ({_chinese_ratio:.3f}), likely English echo"
+            print(f"[TRANSLATE] {last_error} (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+            continue
+
+        write_flat_lines(output_path, flat_lines)
+        elapsed = time.time() - start_time
+        extra = f" (retry {attempt})" if attempt > 0 else ""
+        print(
+            f"[TRANSLATE] OK {chunk_path.name} -> {output_path.name} "
+            f"({elapsed:.1f}s, {group_count} groups, {len(flat_lines)} flat lines){extra}",
+            file=sys.stderr,
+        )
+        return True, ""
 
     print(f"[TRANSLATE] Failed after {max_retries} attempts: {last_error}", file=sys.stderr)
     return False, last_error

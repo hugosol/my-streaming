@@ -14,6 +14,7 @@ import time
 import urllib.request
 import urllib.error
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -24,6 +25,8 @@ _loader = importlib.machinery.SourceFileLoader("wm", str(Path(__file__).parent.p
 _spec = importlib.util.spec_from_loader("wm", _loader)
 worker = importlib.util.module_from_spec(_spec)
 _loader.exec_module(worker)
+
+import worker.translate as translate_module
 
 
 def _start_worker(tmpdir: str, port: int):
@@ -157,15 +160,20 @@ def test_retry_starts_background():
             worker._update_job(jid, status="failed", stage="translating",
                                progress="1/2", error="翻译失败")
 
-            st, body = _post(19890, f"/job/{jid}/retry")
-            # Should accept (200) — retry starts in background
-            # The retry will fail on actual translation (no API), but the endpoint
-            # should accept the request and set status to in_progress
-            assert st in (200, 202), f"want 200/202 got {st}: {body}"
+            def _slow_fake_translate(*args, **kwargs):
+                time.sleep(0.5)
+                return False, "fake"
 
-            # Job should now be in_progress (claimed by retry)
-            j = worker._get_job(jid)
-            assert j["status"] == "in_progress", f"status={j['status']}"
+            with patch.object(translate_module, "translate_chunk", side_effect=_slow_fake_translate):
+                st, body = _post(19890, f"/job/{jid}/retry")
+                # Should accept (200) — retry starts in background.
+                # The fake keeps the background thread alive long enough for the
+                # in_progress claim to be observed deterministically.
+                assert st in (200, 202), f"want 200/202 got {st}: {body}"
+
+                # Job should now be in_progress (claimed by retry)
+                j = worker._get_job(jid)
+                assert j["status"] == "in_progress", f"status={j['status']}"
         finally:
             _stop_worker(srv)
     finally:

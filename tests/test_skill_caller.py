@@ -76,6 +76,7 @@ def _capture_call(
     tmpdir: str,
     model: str | None = None,
     thinking: dict[str, Any] | None = None,
+    call_thinking: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run call_skill with an isolated config/skill dir and a fake OpenAI client.
 
@@ -97,6 +98,7 @@ def _capture_call(
                 "chunk-translator",
                 "Translate this line.",
                 max_tokens=50,
+                thinking=call_thinking,
             )
 
         create_kwargs = fake_client.chat.completions.create_kwargs
@@ -167,12 +169,46 @@ def test_call_skill_does_not_map_model_names():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def test_call_skill_thinking_override_low_effort():
+    """Per-call low-effort override is sent instead of configured high effort."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        kwargs = _capture_call(
+            tmpdir,
+            model="deepseek-v4-flash-vision-exp",
+            thinking={"enabled": True, "effort": "high"},
+            call_thinking={"effort": "low"},
+        )
+        assert kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
+        assert kwargs["reasoning_effort"] == "low"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_call_skill_thinking_override_disabled():
+    """Per-call disabled override suppresses reasoning_effort."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        kwargs = _capture_call(
+            tmpdir,
+            model="deepseek-v4-flash-vision-exp",
+            thinking={"enabled": True, "effort": "high"},
+            call_thinking={"enabled": False},
+        )
+        assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+        assert "reasoning_effort" not in kwargs
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     tests = [
         test_call_skill_uses_config_model_and_thinking,
         test_call_skill_disabled_thinking_omits_effort,
         test_call_skill_defaults_when_config_fields_missing,
         test_call_skill_does_not_map_model_names,
+        test_call_skill_thinking_override_low_effort,
+        test_call_skill_thinking_override_disabled,
     ]
     failures = 0
     for test in tests:

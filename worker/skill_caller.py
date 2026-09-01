@@ -57,6 +57,7 @@ def call_skill(
     user_message: str,
     system_extra: str = "",
     max_tokens: int = 384000,
+    thinking: dict | None = None,
 ) -> str:
     """Call DeepSeek API mimicking OpenCode skill invocation.
     
@@ -65,6 +66,8 @@ def call_skill(
         user_message: The task content / input text
         system_extra: Optional extra instruction appended to the skill message
         max_tokens: Max output tokens
+        thinking: Optional per-call override for the configured thinking settings.
+            Supports partial dicts, e.g. {"effort": "low"} or {"enabled": False}.
     
     Returns:
         Model response text, or empty string on failure.
@@ -84,9 +87,12 @@ def call_skill(
 
     config = _load_config()
     model = config.get("model", "deepseek-v4-flash-vision-exp")
-    thinking = config.get("thinking", {"enabled": True, "effort": "high"})
-    enabled = thinking.get("enabled", True)
-    effort = thinking.get("effort", "high")
+    configured_thinking = config.get("thinking", {"enabled": True, "effort": "high"})
+    enabled = configured_thinking.get("enabled", True)
+    effort = configured_thinking.get("effort", "high")
+    if thinking is not None:
+        enabled = thinking.get("enabled", enabled)
+        effort = thinking.get("effort", effort)
 
     kwargs: dict = {
         "model": model,

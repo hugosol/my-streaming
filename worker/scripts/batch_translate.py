@@ -25,7 +25,7 @@ MAX_SIZE = 100
 SCRIPT_DIR = Path(__file__).resolve().parent
 _WORKER_DIR = SCRIPT_DIR.parent
 sys.path.insert(0, str(_WORKER_DIR.parent))
-from worker.translate import translate_chunk
+from worker.translate import translate_chunk, read_flat_lines, write_flat_lines
 EXTRACT_SCRIPT = SCRIPT_DIR / "extract-subtitle-text.ps1"
 COMBINE_SCRIPT = SCRIPT_DIR / "combine-subtitles.ps1"
 
@@ -337,11 +337,17 @@ def main():
 
     base_name = input_path.stem
     final_output = workspace_dir / f"{base_name}_chinese.txt"
-    with open(final_output, "w", encoding="utf-8") as outf:
-        for idx, _, _, _, chunk_output_path, _ in results:
-            with open(chunk_output_path, "r", encoding="utf-8") as inf:
-                outf.write(inf.read().rstrip("\n"))
-                outf.write("\n")
+    all_lines: list[str] = []
+    for idx, _, _, _, chunk_output_path, _ in results:
+        with open(chunk_output_path, "r", encoding="utf-8") as inf:
+            content = inf.read()
+        if content == "":
+            continue
+        # Chunk files are flat: one line per SRT block, with blank lines
+        # representing missing Chinese rows.  Keep those blanks instead of
+        # collapsing them, otherwise the next group shifts up again.
+        all_lines.extend(read_flat_lines(content))
+    write_flat_lines(final_output, all_lines)
 
     logger.info("Aggregated output: %s (%d bytes)", final_output.name, final_output.stat().st_size)
     logger.info("Done.")

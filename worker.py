@@ -210,7 +210,16 @@ def _run_punctuate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str
             f"为以下SRT字幕块添加英文标点符号，保持 <<N>> 标记不变：\n\n{chunk_text}",
             "请直接输出加好标点的完整文本，不要添加任何解释或额外内容。",
             max_tokens=32768,
+            thinking={"effort": "low"},
         )
+        if not result:
+            result = call_skill(
+                "srt-punctuator",
+                f"为以下SRT字幕块添加英文标点符号，保持 <<N>> 标记不变：\n\n{chunk_text}",
+                "请直接输出加好标点的完整文本，不要添加任何解释或额外内容。",
+                max_tokens=32768,
+                thinking={"enabled": False},
+            )
         if result:
             output_path.write_text(result, encoding="utf-8")
             return True, ""
@@ -463,9 +472,11 @@ def _do_retry(job_id: str) -> None:
                         error=f"retry: B mismatch (DB={B}, actual={B_actual})")
             return
 
-        # 3. Count successful chunks (chinese.txt exists + line count matches + Chinese ratio check)
+        # 3. Count successful chunks (chinese.txt exists + flat line count matches + Chinese ratio check)
         #    Use the same fence-stripping logic as translate_chunk for consistency.
-        from worker.translate import _strip_fences_and_preamble
+        #    translate_chunk now writes one flat line per SRT block and uses
+        #    blank lines for missing Chinese rows, so accept blanks.
+        from worker.translate import read_flat_lines, write_flat_lines
         A_actual = 0
         failed_indices = []
         for cf in chunk_files:
@@ -474,12 +485,14 @@ def _do_retry(job_id: str) -> None:
                 try:
                     src_lines = len([l for l in cf.read_text(encoding="utf-8").split("\n") if l.strip()])
                     cn_text = chinese.read_text(encoding="utf-8")
-                    cn_clean = _strip_fences_and_preamble(cn_text)
-                    out_lines = len([l for l in cn_clean.strip().split("\n") if l.strip()])
+                    # translate_chunk writes clean files; do not strip trailing
+                    # blank rows here or intentional padding would disappear.
+                    cn_lines = read_flat_lines(cn_text)
+                    out_lines = len(cn_lines)
                     if src_lines == out_lines:
                         # Guard: check Chinese character ratio to catch English echo
-                        _ch_chars = sum(1 for c in cn_clean if '\u4e00' <= c <= '\u9fff')
-                        _total = max(len(cn_clean.strip()), 1)
+                        _ch_chars = sum(1 for c in cn_text if '\u4e00' <= c <= '\u9fff')
+                        _total = max(len(cn_text.strip()), 1)
                         _ratio = _ch_chars / _total
                         if _ratio >= 0.03 or src_lines <= 5:
                             A_actual += 1
@@ -520,12 +533,17 @@ def _do_retry(job_id: str) -> None:
         chunk_files_sorted = sorted(
             [f for f in chunks_dir.glob("chunk_*.txt") if "_chinese" not in f.stem]
         )
-        with open(chinese_txt, "w", encoding="utf-8") as outf:
-            for cf in chunk_files_sorted:
-                chinese_chunk = chunks_dir / f"{cf.stem}_chinese.txt"
-                if chinese_chunk.exists():
-                    outf.write(chinese_chunk.read_text(encoding="utf-8").rstrip("\n"))
-                    outf.write("\n")
+        all_chinese_lines: list[str] = []
+        for cf in chunk_files_sorted:
+            chinese_chunk = chunks_dir / f"{cf.stem}_chinese.txt"
+            if chinese_chunk.exists():
+                content = chinese_chunk.read_text(encoding="utf-8")
+                if content == "":
+                    continue
+                # Keep blank rows; they are the intentional alignment padding
+                # when a Chinese sentence group has fewer lines than English.
+                all_chinese_lines.extend(read_flat_lines(content))
+        write_flat_lines(chinese_txt, all_chinese_lines)
 
         combine_script = _SCRIPTS_DIR / "combine-subtitles.ps1"
         rc = _run_subprocess(
