@@ -41,28 +41,32 @@ def split_english_groups(lines: list[str]) -> list[list[str]]:
     return groups
 
 
-def split_translation_groups(text: str) -> list[list[str]]:
-    """Parse LLM translation output into groups separated by blank lines.
+def split_translation_groups(text: str) -> list[list[tuple[int | None, str]]]:
+    """Parse LLM translation output into groups of (target_line, text).
 
-    Also tolerates common LLM decorations: [1] line numbers, group labels
-    such as 【组1】, and runs of dashes/equals used as separators.
+    Each Chinese line may carry a [N] anchor referring to the matching English
+    line number inside its group.  The anchor is preserved so callers can place
+    the translation under the correct English row instead of stacking all
+    Chinese lines at the end of the group.
+
+    Also tolerates common LLM decorations: group labels such as 【组1】 and
+    runs of dashes/equals used as separators.
     """
     raw_lines = text.split("\n")
-    groups: list[list[str]] = []
-    current: list[str] = []
+    groups: list[list[tuple[int | None, str]]] = []
+    current: list[tuple[int | None, str]] = []
 
-    def _clean(line: str) -> str:
+    def _clean(line: str) -> tuple[int | None, str]:
         s = line.strip()
-        # Remove per-line numbering if the model added it.
-        m = re.match(r'^\[\d+\]\s*(.*)$', s)
-        if m:
-            s = m.group(1).strip()
-        # Remove a standalone/leading group label.
+        # Remove a standalone/leading group label before looking for [N].
         s = re.sub(
             r'^(?:【|\[)?\s*(?:组|GROUP|Group)\s*\d+\s*[】\]]?\s*[:：]?\s*',
             '', s
         ).strip()
-        return s
+        m = re.match(r'^\[(\d+)\]\s*(.*)$', s)
+        if m:
+            return int(m.group(1)), m.group(2).strip()
+        return None, s
 
     for line in raw_lines:
         s = line.strip()
@@ -71,10 +75,10 @@ def split_translation_groups(text: str) -> list[list[str]]:
                 groups.append(current)
                 current = []
             continue
-        cleaned = _clean(line)
+        target, cleaned = _clean(line)
         if not cleaned:
             continue
-        current.append(cleaned)
+        current.append((target, cleaned))
 
     if current:
         groups.append(current)
@@ -104,7 +108,8 @@ def read_flat_lines(text: str) -> list[str]:
 def _format_grouped_input(groups: list[list[str]]) -> str:
     parts = []
     for i, group in enumerate(groups, 1):
-        parts.append(f"【组{i}】\n" + "\n".join(group))
+        numbered = "\n".join(f"[{j + 1}] {line}" for j, line in enumerate(group))
+        parts.append(f"【组{i}】\n" + numbered)
     return "\n\n".join(parts)
 
 
@@ -112,34 +117,27 @@ def _build_prompts(input_groups: list[list[str]]) -> list[str]:
     group_count = len(input_groups)
     formatted = _format_grouped_input(input_groups)
 
-    contract = (
-        f"输出 {group_count} 个中文组，组间用空行分隔。\n"
-        "第 i 个中文组只对应第 i 个英文句组，内容留在本组内。\n"
-        "中文组行数可以少于英文组；短是正常的，后续合并会补空行。\n"
-        "每个中文组至少 1 行，最多与对应英文组行数相同，通常更少。\n"
-        "只输出中文翻译行，不加编号、标题、英文原文或解释。"
+    # The full output contract lives in worker/skills/chunk-translator/SKILL.md;
+    # call_skill injects it into every request.  Keep this user prompt short and
+    # only carry the dynamic input plus one retry-specific framing line.
+    base = (
+        f"共有 {group_count} 个英文句组。按 SKILL.md 的规则逐组翻译，"
+        f"每行中文带 [行号]，组间用空行分隔。\n\n"
+        f"{formatted}"
     )
 
     return [
-        # Attempt 1: natural group-by-group translation (primary).
-        f"【按句组翻译】\n\n"
-        f"下面有 {group_count} 个英文句组。每个组里的多行英文是同一句话被时间轴拆开的片段，"
-        f"请先读完整个组，再整体翻译成自然中文。\n\n"
-        f"{contract}\n\n"
-        f"输入：\n{formatted}",
+        # Attempt 1: understand each group as a whole, then place lines.
+        f"【自然译法】先理解整组，再尽量逐行落位。\n\n{base}",
 
-        # Attempt 2: same contract, with the group boundary as the anchor.
-        f"【句组边界优先】\n\n"
-        f"{group_count} 个英文句组，每个组是一个独立语义单元。\n\n"
-        f"{contract}\n\n"
-        f"翻译时以句组为边界，组内断句自然即可。\n\n"
-        f"输入：\n{formatted}",
+        # Attempt 2: maximize line-level correspondence.
+        f"【逐行优先】能独立翻译的英文行就独立翻译；只有合并更自然时才减少行数，"
+        f"并标出主要对应的行号。\n\n{base}",
 
-        # Attempt 3: concise fallback.
-        f"【译句组】\n\n"
-        f"{contract}\n\n"
-        f"翻译以下 {group_count} 个英文句组：\n\n"
-        f"{formatted}",
+        # Attempt 3: strict one-to-one fallback, used only after natural
+        # and line-priority attempts fail to satisfy the parser.
+        f"【逐行对齐】每一行英文单独翻译成一行中文；行号按 1..n 顺序，"
+        f"不合并、不减少。\n\n{base}",
     ]
 
 
@@ -276,11 +274,9 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
             print(f"[TRANSLATE] {last_error} (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
             continue
 
-        # Expand each Chinese group back to one line per English SRT block.
-        # If Chinese has fewer lines than English, pad with blank lines at the
-        # TOP of the group so the Chinese lines sit under the later English
-        # rows.  This keeps the short Chinese translation aligned with the end
-        # of the English sentence and prevents the next group from shifting.
+        # Expand each Chinese group back to one flat line per English SRT
+        # block.  Chinese lines carry [行号] anchors so they land under the
+        # English row they actually translate.  Missing rows stay blank.
         flat_lines: list[str] = []
         alignment_error = ""
         for gi, (in_group, out_group) in enumerate(zip(input_groups, output_groups), 1):
@@ -295,8 +291,37 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
                     f"refusing to shift rows"
                 )
                 break
-            flat_lines.extend([""] * (n - m))
-            flat_lines.extend(out_group)
+
+            slots = [""] * n
+            has_anchor = any(target is not None for target, _ in out_group)
+
+            if not has_anchor:
+                # Fallback: model gave no anchors; keep output order, fill from
+                # the first English row so Chinese is not stacked at the end.
+                for i, (_, text) in enumerate(out_group):
+                    slots[i] = text
+            elif any(target is None for target, _ in out_group):
+                alignment_error = (
+                    f"Group {gi} mixes anchored and unanchored Chinese lines"
+                )
+                break
+            else:
+                for target, text in out_group:
+                    if target < 1 or target > n:
+                        alignment_error = (
+                            f"Group {gi} anchor {target} outside 1..{n}"
+                        )
+                        break
+                    if slots[target - 1]:
+                        alignment_error = (
+                            f"Group {gi} has duplicate anchor {target}"
+                        )
+                        break
+                    slots[target - 1] = text
+                if alignment_error:
+                    break
+
+            flat_lines.extend(slots)
 
         if alignment_error:
             last_error = alignment_error

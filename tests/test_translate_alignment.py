@@ -27,13 +27,16 @@ from worker.translate import (
 
 def _fake_call_skill(*args, **kwargs):
     return (
-        "【组1】我开始想那些比这更有意思的事，\n"
-        "比如报税，或者看油漆变干。\n"
+        "【组1】\n"
+        "[1] 我开始想那些比这更有意思的事，\n"
+        "[3] 比如报税，或者看油漆变干。\n"
         "\n"
-        "【组2】这真的很可惜，因为现在大部分游戏\n"
-        "教程其实做得相当不错了。\n"
+        "【组2】\n"
+        "[1] 这真的很可惜，因为现在大部分游戏\n"
+        "[2] 教程其实做得相当不错了。\n"
         "\n"
-        "【组3】这是另一个句子。"
+        "【组3】\n"
+        "[1] 这是另一个句子。"
     )
 
 
@@ -59,11 +62,11 @@ def test_translate_chunk_pads_short_chinese_group_with_blank_line():
         assert ok, f"expected success, got: {err}"
         lines = read_flat_lines(output.read_text(encoding="utf-8"))
         assert len(lines) == 6, f"expected 6 flat rows, got {len(lines)}: {lines!r}"
-        # The 3-line English sentence has only 2 Chinese lines; the blank is at
-        # the top of the group so the Chinese stays under the later English rows
-        # and the next sentence's translation is not pulled up.
-        assert lines[0] == "", "first row of the short group must be blank"
-        assert lines[1] == "我开始想那些比这更有意思的事，"
+        # Anchored placement: the short Chinese group still keeps its first
+        # line under English row 1 and its second line under English row 3.
+        # The middle row is blank, and the next sentence is not pulled up.
+        assert lines[0] == "我开始想那些比这更有意思的事，"
+        assert lines[1] == "", "middle row left blank by anchored placement"
         assert lines[2] == "比如报税，或者看油漆变干。"
         assert lines[3] == "这真的很可惜，因为现在大部分游戏"
         assert lines[4] == "教程其实做得相当不错了。"
