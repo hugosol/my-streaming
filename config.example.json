@@ -2,8 +2,12 @@
   "video_dir": "E:/Developer/youtube-playground/new-streaaming",
   "worker_port": 8899,
   "db_path": "db/jobs.db",
-  "model": "deepseek/deepseek-v4-flash",
+  "model": "deepseek-v4-flash-vision-exp",
   "deepseek_api_key": "sk-****",
+  "thinking": {
+    "enabled": true,
+    "effort": "high"
+  },
   "yt_download_proxy": "http://127.0.0.1:10808",
   "translation": {
     "chunk_size": "auto",

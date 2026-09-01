@@ -32,22 +32,6 @@ def _get_api_key() -> str:
     return _load_config().get("deepseek_api_key") or os.environ.get("DEEPSEEK_API_KEY", "")
 
 
-def _get_model() -> str:
-    """Map config model name to DeepSeek API model name."""
-    model_id = _load_config().get("model", "deepseek-v4-flash")
-    if "v4-pro" in model_id:
-        return "deepseek-reasoner"
-    return "deepseek-chat"
-
-
-def _get_reasoning_effort() -> str:
-    """DeepSeek maps: minimal/low/medium -> high, high -> high, xhigh -> max."""
-    effort = _load_config().get("reasoning_effort", "medium")
-    if effort in ("xhigh", "max"):
-        return "max"
-    return "high"
-
-
 def build_skill_message(skill_path: Path, args: str = "") -> str:
     """Replicate OpenCode's buildSkillPromptMessage format.
     
@@ -98,15 +82,20 @@ def call_skill(
 
     client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
-    model = _get_model()
+    config = _load_config()
+    model = config.get("model", "deepseek-v4-flash-vision-exp")
+    thinking = config.get("thinking", {"enabled": True, "effort": "high"})
+    enabled = thinking.get("enabled", True)
+    effort = thinking.get("effort", "high")
+
     kwargs: dict = {
         "model": model,
         "messages": [{"role": "user", "content": full_content}],
         "max_tokens": max_tokens,
+        "extra_body": {"thinking": {"type": "enabled" if enabled else "disabled"}},
     }
-    if model == "deepseek-reasoner":
-        kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-        kwargs["reasoning_effort"] = _get_reasoning_effort()
+    if enabled:
+        kwargs["reasoning_effort"] = effort
 
     response = client.chat.completions.create(**kwargs)
     return response.choices[0].message.content or ""

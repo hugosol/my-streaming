@@ -35,11 +35,13 @@ Write-Output "========================================"
 Write-Output "URL: $Url"
 
 $dlpArgs = @(
-    "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]"
+    "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+    "-S", "res:480"
     "--embed-metadata"
     "--merge-output-format", "mp4"
+    "--extractor-args", "youtube:player_client=web_embedded"
     "--write-auto-subs"
-    "--sub-langs", "en-orig,ja-orig"
+    "--sub-langs", "en-orig"
     "--sub-format", "srt"
     "--cookies-from-browser", $CookiesBrowser
     "-o", "%(title)s.mp4"
