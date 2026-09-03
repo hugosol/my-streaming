@@ -39,7 +39,6 @@ $dlpArgs = @(
     "-S", "res:480"
     "--embed-metadata"
     "--merge-output-format", "mp4"
-    "--extractor-args", "youtube:player_client=web_embedded"
     "--write-auto-subs"
     "--sub-langs", "en-orig"
     "--sub-format", "srt"
