@@ -18,6 +18,9 @@ for /f "delims=" %%i in ('where python 2^>nul ^| findstr /v /i "WindowsApps Micr
 :found_python
 echo Using Python: %PYTHON%
 
+REM Make yt-dlp from the virtual environment available to PowerShell subprocesses
+if exist "%~dp0.venv\Scripts\yt-dlp.exe" set "PATH=%~dp0.venv\Scripts;%PATH%"
+
 REM Start worker in its own window
 start "My Streaming Worker" "%PYTHON%" worker.py
 
