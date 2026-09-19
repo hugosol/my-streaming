@@ -350,3 +350,23 @@ def translate_chunk(chunk_path: Path, output_path: Path) -> tuple[bool, str]:
 
     print(f"[TRANSLATE] Failed after {max_retries} attempts: {last_error}", file=sys.stderr)
     return False, last_error
+
+
+def repair_alignment_call(request: str) -> str:
+    """The external call the optional local alignment repair uses.
+
+    Takes one request — the sentence groups of one Translation Chunk that still
+    hold a Chinese gap — and returns the model's raw answer.  Both the normal
+    translation path (``worker/scripts/batch_translate.py``) and the retry/continue
+    path (``worker._do_retry``) hand this call to
+    :func:`worker.bilingual_srt.generate_bilingual_srt`, so the repair reads the
+    same way on both.
+
+    It asks exactly once: the repair is an optional improvement on a result that is
+    already usable, so an answer that does not come back leaves that result in
+    place (``worker.bilingual_srt`` rolls it back) rather than being asked for
+    again.  Retrying is the translation's own business and keeps its own attempts.
+    """
+    from worker.skill_caller import call_skill
+
+    return call_skill(skill_name="srt-alignment-repair", user_message=request)

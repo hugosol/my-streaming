@@ -155,7 +155,8 @@ def test_retry_starts_background():
             # Create 2 chunks: one success, one failed
             (chunks_dir / "chunk_001.txt").write_text("Hello.", encoding="utf-8")
             (chunks_dir / "chunk_001_chinese.txt").write_text("你好。", encoding="utf-8")
-            # chunk_002 missing _chinese.txt
+            (chunks_dir / "chunk_002.txt").write_text("World.", encoding="utf-8")
+            # chunk_002 missing _chinese.txt, so the retry has to redo it
 
             worker._update_job(jid, status="failed", stage="translating",
                                progress="1/2", error="翻译失败")

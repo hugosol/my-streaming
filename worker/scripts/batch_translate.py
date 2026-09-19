@@ -25,9 +25,14 @@ MAX_SIZE = 100
 SCRIPT_DIR = Path(__file__).resolve().parent
 _WORKER_DIR = SCRIPT_DIR.parent
 sys.path.insert(0, str(_WORKER_DIR.parent))
-from worker.translate import translate_chunk, read_flat_lines, write_flat_lines
+from worker.bilingual_srt import generate_bilingual_srt
+from worker.translate import (
+    repair_alignment_call,
+    translate_chunk,
+    read_flat_lines,
+    write_flat_lines,
+)
 EXTRACT_SCRIPT = SCRIPT_DIR / "extract-subtitle-text.ps1"
-COMBINE_SCRIPT = SCRIPT_DIR / "combine-subtitles.ps1"
 
 SENTENCE_END_RE = re.compile(r'[.?!]$')
 
@@ -353,17 +358,23 @@ def main():
     logger.info("Done.")
 
     if original_srt_path and not args.no_combine:
-        combine_script = COMBINE_SCRIPT.resolve()
         chinese_txt = workspace_dir / f"{input_path.stem}_chinese.txt"
         original_txt = workspace_dir / f"{original_srt_path.stem}_original.txt"
         logger.info("Combining back to bilingual SRT...")
-        if not run_powershell(combine_script, [
-            "-InputFile", str(original_srt_path),
-            "-OriginalText", str(original_txt),
-            "-ChineseText", str(chinese_txt),
-        ], original_srt_path.parent, logger):
-            logger.error("SRT combination failed")
+        english_rows = read_flat_lines(original_txt.read_text(encoding="utf-8"))
+        # The optional local alignment repair: one request per affected
+        # Translation Chunk through the shared external call.  A repair that fails
+        # leaves the translated rows this step already has and is not retried.
+        result = generate_bilingual_srt(
+            original_srt_path,
+            all_lines,
+            english_rows=english_rows,
+            model_call=repair_alignment_call,
+        )
+        if not result.ok:
+            logger.error("SRT combination failed: %s", result.error)
             sys.exit(1)
+        logger.info("Created bilingual subtitle file: %s", result.path)
 
 
 if __name__ == "__main__":

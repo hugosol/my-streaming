@@ -147,7 +147,7 @@ def test_call_skill_defaults_when_config_fields_missing():
     tmpdir = tempfile.mkdtemp()
     try:
         kwargs = _capture_call(tmpdir)
-        assert kwargs["model"] == "deepseek-v4-flash-vision-exp"
+        assert kwargs["model"] == "deepseek-flash"
         assert kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
         assert kwargs["reasoning_effort"] == "high"
     finally:

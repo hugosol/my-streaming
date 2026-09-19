@@ -65,4 +65,4 @@ _Avoid_: 标点工作区、临时目录
 ### 输出产物
 
 **Bilingual SRT**:
-`combine-subtitles.ps1` 合并原文和中文后生成的双语字幕文件，命名为 `Bilingual_<原名>.srt`。`finalize-subtitles.ps1` 将其替换为原文件名，原文件备份为 `<原名>-src.srt`。
+由 `worker/bilingual_srt.py` 从带时间的英文字幕与 Translation Chunk 中文结果组装的双语字幕文件，命名为 `Bilingual_<原名>.srt`；正常翻译与重试继续两条路径都经该模块交付。`finalize-subtitles.ps1` 将其替换为原文件名，原文件备份为 `<原名>-src.srt`。

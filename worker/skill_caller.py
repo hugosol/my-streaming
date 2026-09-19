@@ -86,7 +86,7 @@ def call_skill(
     client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
     config = _load_config()
-    model = config.get("model", "deepseek-v4-flash-vision-exp")
+    model = config.get("model", "deepseek-flash")
     configured_thinking = config.get("thinking", {"enabled": True, "effort": "high"})
     enabled = configured_thinking.get("enabled", True)
     effort = configured_thinking.get("effort", "high")

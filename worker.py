@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import uuid
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -554,7 +555,7 @@ def _do_retry(job_id: str) -> None:
             A += 1
             _update_job(job_id, progress=f"{A}/{B}")
 
-        # 6. Aggregate _chinese.txt chunks and combine back to bilingual SRT
+        # 6. Aggregate _chinese.txt chunks and deliver the bilingual SRT
         original_txt = workspace_dir / f"{srt_path.stem}_original.txt"
         chinese_txt = workspace_dir / f"{srt_path.stem}_chinese.txt"
 
@@ -573,15 +574,24 @@ def _do_retry(job_id: str) -> None:
                 all_chinese_lines.extend(read_flat_lines(content))
         write_flat_lines(chinese_txt, all_chinese_lines)
 
-        combine_script = _SCRIPTS_DIR / "combine-subtitles.ps1"
-        rc = _run_subprocess(
-            ["powershell.exe", "-ExecutionPolicy", "Bypass", "-File", str(combine_script),
-             "-InputFile", str(srt_path),
-             "-OriginalText", str(original_txt),
-             "-ChineseText", str(chinese_txt)],
-            job_dir, "COMBINE-RETRY",
+        from worker.bilingual_srt import generate_bilingual_srt
+        from worker.translate import repair_alignment_call
+        english_rows = None
+        if original_txt.exists():
+            english_rows = read_flat_lines(original_txt.read_text(encoding="utf-8"))
+        # The optional local alignment repair: one request per affected Translation
+        # Chunk through the shared external call.  A repair that fails leaves the
+        # rows the chunks already delivered and is not retried, and the real
+        # failures above and below (missing rows, a write that cannot happen) are
+        # still reported as failures.
+        result = generate_bilingual_srt(
+            srt_path,
+            all_chinese_lines,
+            english_rows=english_rows,
+            model_call=repair_alignment_call,
         )
-        if rc != 0:
+        if not result.ok:
+            print(f"[COMBINE-RETRY] {result.error}")
             _update_job(job_id, status="failed", error="双语字幕合并失败")
             return
 
