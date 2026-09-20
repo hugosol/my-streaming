@@ -64,16 +64,16 @@ def test_long_press_reaches_2x(session):
 ## 实测边界（这些事实决定了上面助手的适用范围）
 
 - **chromium 丢弃首个小于 16 CSS 像素的 touchmove**：4/8/12/14 像素的移动不会到达页面，
-  ≥16 像素才送达（后续小位移正常送达）。做「12 像素阈值」类用例时必须考虑这一点。
+  ≥16 像素才送达（后续小位移正常送达）。需要比这更小的位移时只能走合成通道，必须考虑这一点。
   票据 03 复测（CDP 真实触摸，在 (400, 203.8) 处按下）：2/4/8/12/14 像素 → 页面收到 0 个
   touchmove；16/20/40 像素 → 各 1 个，`isTrusted=true` 且 `clientX` 精确等于派发值。因此
-  chromium 上**可信输入只能构造「越过 12 像素门槛」的移动**，门槛内侧与恰好 12 的移动必须用
-  `move_exact_*`（页面内合成，弱证据）——这决定了 03 的用例结构，不能把「事件没到达」当绿灯。
+  chromium 上走可信输入的移动必须 ≥16 像素（更小的位移只能用 `move_exact_*`，弱证据），
+  断言时不能把「事件没到达」当绿灯。
 - **引擎会量化合成触摸坐标**：chromium 用 `new Touch(...)` 构造时坐标被压到 float32
   （实测按下点 y=203.79999999999998 → 合成触点读回 203.80000305175781，于是「12 像素」的
   位移在页面上变成 12.000000000000389）；webkit 的 `document.createTouch` 不做量化
-  （派发值原样读回）。所以「恰好 12 CSS 像素」这类边界用例必须选能被量化无损表示的按压点与
-  目标点，并断言 `evidence.events` 里**读回**的真实位移，而不是断言打算派发的位移。
+  （派发值原样读回）。所以需要精确坐标的用例要断言 `evidence.events` 里**读回**的真实位移，
+  而不是断言打算派发的位移；想构造精确边界时还得选能被量化无损表示的按压点与目标点。
 - **webkit 无法用真实输入做按压序列**：`new Touch(...)` 不存在；`new TouchEvent(type, {touches: []})`
   会抛 `TypeError`，必须传 `document.createTouchList(...)`；`document.createTouch` 是可用路径。
   合成事件必须用小写 DOM 事件名（`touchstart`，不是 CDP 的 `touchStart`），坐标必须以 `{x, y}`
@@ -371,9 +371,9 @@ class TouchGesture:
         """移动到绝对坐标（一步 touchmove），**总是**走页面内合成事件。
 
         与 `move_to` 的区别：`move_to` 在 chromium 上走 CDP，而 CDP 会丢弃首个小于 16 CSS 像素的
-        真实 touchmove（见模块 docstring「实测边界」），所以 12 CSS 像素门槛附近的移动在 chromium
-        上根本无法用可信输入构造。本方法用页面内合成 `TouchEvent` 精确给出坐标：不受引擎触摸 slop
-        影响，但事件 `isTrusted === false`，是**弱证据**。
+        真实 touchmove（见模块 docstring「实测边界」），所以更小的位移在 chromium 上无法用可信输入
+        构造。本方法用页面内合成 `TouchEvent` 精确给出坐标：不受引擎触摸 slop 影响，但事件
+        `isTrusted === false`，是**弱证据**。
 
         记录的坐标是页面实际构造出的触点（`evidence.events` 里逐事件标 `trusted=False`）：引擎对
         合成坐标的量化会如实反映在记录里，用例据此判断自己到底构造了多大的位移。

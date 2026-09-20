@@ -9,7 +9,7 @@
 | P6 | 切到后台（等待期 / 加速期）：取消等待 / 立即恢复原速，返回前台后速度仍是长按前速度 | **页面内合成 `visibilitychange`（覆写 `document.hidden` / `document.visibilityState`，`isTrusted=false`）= 弱证据**：headless 桌面浏览器无法构造真实后台切换（实测新标签页 `bring_to_front()` 不触发 `visibilitychange`、`document.hidden` 始终 `false`） |
 | P6 | 系统取消触摸（等待期 / 加速期）：恢复原速、不遗留临时倍速 | 按压同上：chromium `Input.dispatchTouchEvent` 的 `touchCancel`（可信）/ webkit 合成 `touchcancel`（弱证据） |
 | P6 | 中断不启动播放：三种中断分别覆盖播放中与暂停中 | 同上（观察 `video.paused`） |
-| P7 | 已结束手势不复活：滑动取消后移回按下点、后台往返、切换观看模式后都不出现 2× | 越界移动：chromium 真实 16 CSS 像素 touchmove（可信）/ webkit 合成精确移动（弱证据） |
+| P7 | 已结束手势不复活：切后台、切换观看模式结束本次长按后，手指继续按住、继续移动、时间继续推进都不出现 2× | 中断通道见上两行；结束后的移动：chromium 页面内合成精确移动 / webkit 合成（弱证据），只用它证明「移动不复活」 |
 | P7 | 取消后重新按下必须重新等待完整 门槛（门槛两侧，两种模式；取消 = 系统取消 / 全屏切换 / 后台往返） | 受控时间（`clock.advance`）+ 按压同上 |
 | P10 | 已识别长按正常松手结束、被系统取消后，播放/暂停状态不变 | 按压同上 |
 | P10 | 短于门槛的按压（0 / 门槛的 1/4 / 门槛前 1 毫秒）不改变速度、不改变播放/暂停状态 | 按压同上；另用一次**可信真实 tap**核对引擎基线（见下） |
@@ -56,10 +56,9 @@ from player_harness import (  # noqa: F401  (下面这些是有名字的 pytest 
 pytestmark = pytest.mark.parametrize("engine", PLAYWRIGHT_ENGINES)
 
 #: 门槛来自部署配置（config.json → player.hold_ms，默认 500）：测试不写死数值。
-#: 临时速度绝对值 2×、位移容差 12 CSS 像素是契约固定值。
+#: 临时速度绝对值 2× 是契约固定值；手指位移不参与判定（2026-09-20 决定，见 docs/adr/0002）。
 HOLD_MS = configured_hold_ms()
 TEMPORARY_RATE = 2.0
-SLOP_PX = 12.0
 
 #: 门槛前先停住的时长：取门槛的 1/4，保证「连续两次等待」仍停在门槛前（随配置变化）。
 WAITING_MS = HOLD_MS // 4
@@ -74,8 +73,9 @@ PHASES = ("waiting", "accelerating")
 #: 表示的值（chromium 会把合成触摸坐标压到 float32，见夹具「实测边界」）。
 _PRESS_FRAC = {"x_frac": 0.5, "y_frac": 0.25}
 
-#: chromium 上引擎能送达的最小越界位移：CDP 会丢弃首个 <16 CSS 像素的真实 touchmove，16 才到达页面。
-_TRUSTED_MOVE_PX = 16.0
+#: 手势结束后用来验证「移动不复活」的明显位移（CSS 像素），以及页面读回位移的下限。
+_FAR_MOVE_PX = 40.0
+_FAR_MIN = 20.0
 
 #: 01/02 实测记录并在本票复测的平台基线：可信真实 tap 点击画面是否切换播放/暂停。
 #: webkit 会切换（3/3 稳定），chromium 的 touch tap 不会。本票的改动不得掩平这个差异。
@@ -241,9 +241,9 @@ def _press_evidence(gesture: TouchGesture, *, engine: str, what: str) -> str:
 
 
 def _press_evidence_with_synthetic_moves(gesture: TouchGesture, *, engine: str, what: str) -> str:
-    """核对「按压 + 一次可信/合成移动 + 合成移回」这种混合序列的通道，返回证据说明。
+    """核对「按压 + 合成移动 + 抬起」这种混合序列的通道，返回证据说明。
 
-    chromium 上按下/抬起是 CDP 真实触摸，移回按下点是页面内合成（精确坐标，`isTrusted=false`）
+    chromium 上按下/抬起是 CDP 真实触摸，移动是页面内合成（精确坐标，`isTrusted=false`）
     ——混用通道时必须如实标成混合（弱证据），不能当成全程可信。
     """
     evidence = gesture.evidence
@@ -265,23 +265,6 @@ def _press_evidence_with_synthetic_moves(gesture: TouchGesture, *, engine: str, 
     else:
         assert evidence.trusted_input is False, f"{what}: webkit 的按压序列只能是合成事件（弱证据）"
     return f"{evidence.strength}（{evidence.mechanism}）"
-
-
-def _slide_beyond_slop(gesture: TouchGesture, *, engine: str) -> str:
-    """让手指越过 12 CSS 像素门槛结束本次手势，返回这一步移动的通道说明。
-
-    chromium 用 CDP 真实移动（16 像素是引擎能送达的最小越界位移）= 可信输入；webkit 没有可信移动
-    通道，用页面内合成精确移动 = 弱证据。两种情况下都核对页面**读回**的位移真的越过了门槛。
-    """
-    if engine == "chromium":
-        gesture.move_by(_TRUSTED_MOVE_PX, 0.0)
-        channel = "可信真实输入（CDP 16 CSS 像素 touchmove）"
-    else:
-        gesture.move_exact_by(13.0, 0.0)
-        channel = "合成事件（弱证据）"
-    dx, dy, distance = _last_move(gesture)
-    assert distance > SLOP_PX, f"越界移动必须真的到达页面并超过门槛（读回 dx={dx!r} dy={dy!r}）"
-    return f"{channel}，读回位移 {distance:.3f} CSS 像素"
 
 
 def _assert_no_extra_toggle(target: PlayerSession, *, was_paused: bool, what: str) -> None:
@@ -499,61 +482,52 @@ def test_interruption_never_starts_playback_while_video_is_paused(session: Playe
 # --------------------------------------------------------------------------- P7：旧手势不复活
 
 
-@pytest.mark.parametrize("phase", PHASES)
-@pytest.mark.parametrize("mode", MODES)
-def test_ended_press_never_revives_when_finger_returns(session: PlayerSession, mode: str, phase: str) -> None:
-    """P7：滑动取消后把手指移回按下点、再在门槛内挪动，都不会让旧手势复活。"""
-    gesture = _open_and_press(session, mode=mode, phase=phase)
-    channel = _slide_beyond_slop(gesture, engine=session.harness.engine)
-    assert session.read().playback_rate == 1.0, f"越过门槛必须结束本次手势（{channel}）"
-
-    gesture.move_exact_by(0.0, 0.0)  # 移回按下点
-    session.clock.advance(REVIVAL_MS)
-    assert session.read().playback_rate == 1.0, "移回按下点不得让已结束的手势复活"
-
-    gesture.move_exact_by(5.0, 0.0)  # 再挪一点点（仍在门槛内）
-    session.clock.advance(REVIVAL_MS)
-    assert session.read().playback_rate == 1.0, "结束后的任何移动都不得让旧手势复活"
-
-    gesture.up()
-    session.clock.advance(REVIVAL_MS)
-    state = session.read()
-    assert state.playback_rate == 1.0, "抬起后也不得触发"
-    assert state.paused is False, "结束的手势不得影响播放状态"
-    _press_evidence_with_synthetic_moves(gesture, engine=session.harness.engine, what=f"滑动取消（{channel}）")
-
-
 @pytest.mark.parametrize("mode", MODES)
 def test_ended_press_never_revives_after_background_roundtrip(session: PlayerSession, mode: str) -> None:
-    """P7：已结束的手势在后台往返后不复活（弱证据：可见性为合成事件）。"""
-    gesture = _open_and_press(session, mode=mode, phase="waiting")
-    channel = _slide_beyond_slop(gesture, engine=session.harness.engine)
-    session.clock.advance(REVIVAL_MS)
-    assert session.read().playback_rate == 1.0, f"越过门槛必须结束本次手势（{channel}）"
+    """P7：切后台结束本次长按；回到前台后手指继续按住、继续移动都不会让旧手势复活。
 
+    可见性是页面内合成事件（弱证据）；结束后的移动走合成通道（`move_exact_by`），只用来证明
+    「移动不复活」，不构成触摸平台结论。
+    """
+    gesture = _open_and_press(session, mode=mode, phase="waiting")
     _set_page_visibility(session, hidden=True)
-    session.clock.advance(HOLD_MS)
+    session.clock.advance(REVIVAL_MS)
+    assert session.read().playback_rate == 1.0, "切后台必须结束本次长按"
+
     _set_page_visibility(session, hidden=False)
     session.clock.advance(REVIVAL_MS)
     state = session.read()
-    assert state.playback_rate == 1.0, "后台往返后旧手势不得复活"
+    assert state.playback_rate == 1.0, "回到前台后旧手势不得复活（不得延迟触发临时倍速）"
     assert state.paused is False, "后台往返不得改变播放状态"
 
+    gesture.move_exact_by(_FAR_MOVE_PX, 0.0)  # 手指继续移动：位移已不参与判定
+    dx, dy, distance = _last_move(gesture)
+    assert distance >= _FAR_MIN, f"这一步移动必须真的到达页面（读回 dx={dx!r} dy={dy!r}）"
+    session.clock.advance(REVIVAL_MS)
+    assert session.read().playback_rate == 1.0, "结束后的移动不得让旧手势复活"
+
     gesture.up()
-    assert session.read().playback_rate == 1.0
-    _press_evidence(gesture, engine=session.harness.engine, what="后台往返期间的按压")
+    session.clock.advance(REVIVAL_MS)
+    assert session.read().playback_rate == 1.0, "抬起后也不得触发"
+    _press_evidence_with_synthetic_moves(gesture, engine=session.harness.engine, what="后台往返期间的按压")
 
 
 @pytest.mark.parametrize("mode", MODES)
 def test_ended_press_never_revives_after_viewing_mode_switch(session: PlayerSession, mode: str) -> None:
-    """P7：已结束的手势在进出观看模式后都不复活（切换用真实按钮点击）。"""
-    gesture = _open_and_press(session, mode=mode, phase="waiting")
-    channel = _slide_beyond_slop(gesture, engine=session.harness.engine)
-    assert session.read().playback_rate == 1.0, f"越过门槛必须结束本次手势（{channel}）"
+    """P7：切换观看模式结束本次长按；切换后手指继续按住、继续移动都不会让旧手势复活。
 
+    切换是真实按钮点击（引擎级输入）；结束后的移动走合成通道，只用来证明「移动不复活」。
+    """
+    gesture = _open_and_press(session, mode=mode, phase="waiting")
     switch = _switch_viewing_mode(session, mode=mode)
     session.clock.advance(REVIVAL_MS)
-    assert session.read().playback_rate == 1.0, f"切换观看模式后旧手势不得复活（{switch}）"
+    assert session.read().playback_rate == 1.0, f"切换观看模式必须结束本次长按（{switch}）"
+
+    gesture.move_exact_by(_FAR_MOVE_PX, 0.0)  # 手指继续移动：位移已不参与判定
+    dx, dy, distance = _last_move(gesture)
+    assert distance >= _FAR_MIN, f"这一步移动必须真的到达页面（读回 dx={dx!r} dy={dy!r}）"
+    session.clock.advance(REVIVAL_MS)
+    assert session.read().playback_rate == 1.0, "结束后的移动不得让旧手势复活"
 
     switch_back = _switch_viewing_mode(session, mode="fullscreen" if mode == "inline" else "inline")
     session.clock.advance(REVIVAL_MS)
@@ -563,7 +537,7 @@ def test_ended_press_never_revives_after_viewing_mode_switch(session: PlayerSess
 
     gesture.up()
     assert session.read().playback_rate == 1.0
-    _press_evidence(gesture, engine=session.harness.engine, what="观看模式切换期间的按压")
+    _press_evidence_with_synthetic_moves(gesture, engine=session.harness.engine, what="观看模式切换期间的按压")
 
 
 # --------------------------------------------------------------------------- P7：重新计时

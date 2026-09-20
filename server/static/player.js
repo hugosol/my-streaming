@@ -77,8 +77,9 @@ window.addEventListener('orientationchange', function() {
 
 // 长按临时倍速：正在播放时按住画面非控件区域满「配置门槛」临时切到固定 2×，
 // 松手立即恢复长按前的实际速度；暂停时不触发，也不开始播放。
-// 手指相对按下点滑动超过 HOLD_SLOP_PX 时本次手势结束（等待期取消等待，加速期恢复原速）。
-// 切到后台、进入/退出自制全屏、系统取消触摸同样结束本次手势（唯一的结束出口 holdEnd）。
+// 按住期间的滑动不影响手势：任意方向、任意距离的位移都不结束等待或加速（2026-09-20 用户决定）。
+// 结束只有两条路：松手，或中断（切到后台 / 进入或退出自制全屏 / 系统取消触摸 / 第二根手指落下）。
+// 唯一的结束出口是 holdEnd。
 // 监听挂在视频元素上：自制全屏按钮等控件不是它的子节点，落在控件上的触摸不会进入本手势；
 // 全程不调用 preventDefault，原生控件与短按行为照旧。
 // 门槛来自服务端注入的配置（config.json → player.hold_ms，默认 500）；
@@ -90,16 +91,15 @@ function holdMsFromConfig() {
 }
 var HOLD_MS = holdMsFromConfig();
 var HOLD_RATE = 2;
-var HOLD_SLOP_PX = 12; // 单位是 CSS 像素：clientX/clientY 就是 CSS 像素（不随缩放/设备像素比变化）
 
 var holdGesture = null;
 
 function holdIsPlaying() { return !v.paused && !v.ended; }
 
-function holdBegin(x, y) {
+function holdBegin() {
   if (holdGesture) return;
-  // 判定基础在按下瞬间固定：起点坐标与当时的速度（后续位移判定复用同一份记录）。
-  var gesture = { x: x, y: y, rate: v.playbackRate, playing: holdIsPlaying(), triggered: false };
+  // 判定基础在按下瞬间固定：当时的速度与是否在播放（位移不参与判定）。
+  var gesture = { rate: v.playbackRate, playing: holdIsPlaying(), triggered: false };
   holdGesture = gesture;
   gesture.timer = setTimeout(function() {
     if (!gesture.playing || !holdIsPlaying()) return; // 门槛点仍须正在播放
@@ -118,15 +118,9 @@ function holdEnd() {
 
 v.addEventListener('touchstart', function(e) {
   if (e.touches.length !== 1) { holdEnd(); return; } // 多指或异常序列不属于本手势
-  holdBegin(e.touches[0].clientX, e.touches[0].clientY);
+  holdBegin();
 });
-v.addEventListener('touchmove', function(e) {
-  // 位移按「按下点到当前点的直线距离」算，不是累计路径；起点只取 holdGesture 里按下瞬间的记录。
-  if (!holdGesture || e.touches.length !== 1) return;
-  var dx = e.touches[0].clientX - holdGesture.x;
-  var dy = e.touches[0].clientY - holdGesture.y;
-  if (Math.hypot(dx, dy) > HOLD_SLOP_PX) holdEnd(); // 结束走唯一出口：清空手势、清计时器、按需恢复原速
-});
+// 这里没有 touchmove 监听：手指滑动不参与手势判定，位移既不取消等待也不结束加速（见上方说明）。
 v.addEventListener('touchend', function(e) {
   if (e.touches.length === 0) holdEnd();
 });
