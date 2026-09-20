@@ -2,11 +2,11 @@
 
 ### Issue tracker
 
-Issues tracked as local markdown files under `.scratch/<feature>/`. See `docs/agents/issue-tracker.md`.
+Issues tracked as local markdown files under `.scratch/<feature>/`, with decision tickets in `decision/` and implementation tickets in `implementation/`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
-All five canonical roles use their default names. See `docs/agents/triage-labels.md`.
+Decision tickets use `open`/`claimed`/`resolved`; implementation tickets use `ready-for-agent`/`ready-for-human`/`in-progress`/`closed`; shared labels are `needs-triage`/`needs-info`/`wontfix`. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
