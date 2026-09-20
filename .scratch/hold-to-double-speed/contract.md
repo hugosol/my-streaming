@@ -4,21 +4,23 @@ Source: [spec](spec.md)
 
 Approval: approved — 用户已明确批准契约，包含 P1–P10、S1、inferred 澄清与验证分工；可进入 `/to-tickets`。批准不表示实现或验收完成。
 
+修订 2026-09-20：长按门槛由写死的 500 毫秒改为**可配置**（`config.json` → `player.hold_ms`，默认 500 毫秒；服务端归一化 250–1500 并注入页面 `data-hold-ms`，实现与测试都读配置值）。承诺语义不变（在配置门槛处触发）；滑动阈值与临时倍速仍为契约固定值。用户请求并确认。
+
 ## Promises
 
 所有承诺均在 S1 观察。Coverage 是需要覆盖的场景，不表示已经执行或通过。期望值取自规格与独立示例，不从实现计算。交付票据映射由 `/to-tickets` 补充；不维护逐条状态列。
 
 |#|Promise (one observable result)|Coverage|Source|Seam|
 |---|---|---|---|---|
-|P1|在视频画面非控件区域持续按住满 500 毫秒后，正在播放的 Video 临时以固定 2× 播放。|iOS Safari 普通页面、自制横屏全屏；左、中、右非控件区域；未满 500 毫秒不触发、达到门槛后触发；1× 和 1.5× 均变为 2×；持续按住保持 2×。真实浏览器调度不以精确墙钟毫秒作为实时性能保证。|stories 1–7；Implementation Decisions|S1|
+|P1|在视频画面非控件区域持续按住满配置门槛（默认 500 毫秒）后，正在播放的 Video 临时以固定 2× 播放。|iOS Safari 普通页面、自制横屏全屏；左、中、右非控件区域；未满配置门槛不触发、达到配置门槛后触发；门槛随配置生效（`config.json` → `player.hold_ms`，默认 500 毫秒，归一化 250–1500）；1× 和 1.5× 均变为 2×；持续按住保持 2×。真实浏览器调度不以精确墙钟毫秒作为实时性能保证。|stories 1–7；Implementation Decisions|S1|
 |P2|松手恢复长按前的实际播放速度。|1× → 2× → 1×；1.5× → 2× → 1.5×；两种观看模式；未达门槛松手不改变速度。|stories 8–9；Implementation Decisions|S1|
-|P3|暂停状态下长按不启动播放，也不进入临时倍速。|两种观看模式；按住超过 500 毫秒并松开，仍暂停且速度未改变。|story 10；Implementation Decisions|S1|
+|P3|暂停状态下长按不启动播放，也不进入临时倍速。|两种观看模式；按住超过配置门槛并松开，仍暂停且速度未改变。|story 10；Implementation Decisions|S1|
 |P4|手指相对按下位置移动未超过 12 CSS 像素时，不因该移动取消长按。|等待触发、已加速；零位移、轻微位移、恰为 12 CSS 像素；自制横屏旋转后仍按屏幕上的 CSS 像素衡量。|story 11；Implementation Decisions；旋转后的统一尺度为 inferred|S1|
 |P5|相对按下位置移动超过 12 CSS 像素时，本次长按结束。|等待期间取消且之后不延迟触发；加速期间恢复原速；两种观看模式；位移按起点至当前点的直线距离而非累计路径衡量（inferred），覆盖斜向移动。|stories 12–13；Implementation Decisions；距离度量为 inferred|S1|
 |P6|切后台、切换自制全屏或系统取消手势时，本次长按结束且不遗留临时倍速。|每种中断分别覆盖等待期间与加速期间；进入和退出自制全屏；后台返回后观察原速；中断未启动播放。|stories 14–16；Implementation Decisions|S1|
-|P7|已经结束或取消的手势不能自行再次触发临时倍速。|滑动后移回、后台返回、全屏切换后均不复活旧手势；重新按下需重新等待完整 500 毫秒。|story 17；Implementation Decisions|S1|
+|P7|已经结束或取消的手势不能自行再次触发临时倍速。|滑动后移回、后台返回、全屏切换后均不复活旧手势；重新按下需重新等待完整配置门槛。|story 17；Implementation Decisions|S1|
 |P8|长按临时倍速不产生额外可见提示。|等待、加速和恢复三个阶段；普通页面与自制横屏全屏；没有新文字、图标或提示浮层。|story 18|S1|
-|P9|视频控件和自制全屏控件维持原有操作，不触发长按临时倍速。|播放、暂停、进度拖动、进入及退出自制全屏；触摸落在控件上并停留超过 500 毫秒；控件可见时不会被手势区域截获。|stories 19–20；Implementation Decisions|S1|
+|P9|视频控件和自制全屏控件维持原有操作，不触发长按临时倍速。|播放、暂停、进度拖动、进入及退出自制全屏；触摸落在控件上并停留超过配置门槛；控件可见时不会被手势区域截获。|stories 19–20；Implementation Decisions|S1|
 |P10|短按保持原有行为，长按结束不额外切换播放或暂停。|两种观看模式；短按与改动前行为一致；正常结束或取消已识别长按后不产生额外播放切换。|story 21；Implementation Decisions|S1|
 
 ## Seam decisions
@@ -40,7 +42,7 @@ Approval: approved — 用户已明确批准契约，包含 P1–P10、S1、infe
 ### Dependency and observation decisions
 
 - 手势位移计算和临时状态属于 in-process；不为其预先引入 adapter 或新增公开 interface。
-- 时间属于可受控的本地依赖（local-substitutable）：必要时可用可控时间验证 500 毫秒门槛；这是内部测试手段，不增加契约 seam，也不证明真机兼容。
+- 时间属于可受控的本地依赖（local-substitutable）：必要时可用可控时间验证配置门槛；这是内部测试手段，不增加契约 seam，也不证明真机兼容。
 - Safari 媒体引擎、原生控件和系统触摸行为属于 true external。mock adapter 最多证明内部响应，不能替代对 Safari 行为的验证；本契约不为了 mock 新增公开 port。
 - 现有串流来源属于 remote but owned，但本功能不改变其承诺，不新增串流 adapter 契约。页面验证使用可正常播放的 Video，避免把网络缓冲误判成倍速行为。
 - 通过页面操作和媒体元素公开可观察的速度、暂停状态验证，不读取私有计时器或手势变量。不以自己发送的事件是否被 mock 收到作为验收结果。

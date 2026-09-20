@@ -4,7 +4,7 @@
 
 | 承诺 | 本文件覆盖 | 输入证据强度 |
 |---|---|---|
-| P4 | 等待触发期间：零位移、轻微位移、恰好 12 CSS 像素（两个轴向）、斜向紧贴门槛内侧；连续多次移动都不取消，满 500 毫秒仍触发 2× | chromium：**CDP 真实按下 + 页面内合成精确移动**（移动是弱证据，见下）；webkit：全序列页面内合成（弱证据） |
+| P4 | 等待触发期间：零位移、轻微位移、恰好 12 CSS 像素（两个轴向）、斜向紧贴门槛内侧；连续多次移动都不取消，满门槛仍触发 2× | chromium：**CDP 真实按下 + 页面内合成精确移动**（移动是弱证据，见下）；webkit：全序列页面内合成（弱证据） |
 | P4 | 已加速期间：同样的位移集合都不结束手势，维持 2× | 同上 |
 | P4 | 门槛按 CSS 像素：设备像素比 2 下 12 CSS 像素仍是门槛内侧 | 同上 |
 | P5 | 等待期间越过门槛：立即取消，且移回原位、继续按住、再次移动、抬起都不会延迟触发 | 同上 |
@@ -40,6 +40,7 @@ import pytest
 
 from player_harness import (  # noqa: F401  (下面这些是有名字的 pytest 夹具，必须导入本模块才可见)
     PLAYWRIGHT_ENGINES,
+    configured_hold_ms,
     PlayerHarness,
     PlayerSession,
     TouchGesture,
@@ -51,8 +52,9 @@ from player_harness import (  # noqa: F401  (下面这些是有名字的 pytest 
 
 pytestmark = pytest.mark.parametrize("engine", PLAYWRIGHT_ENGINES)
 
-#: 契约固定值：门槛 500 毫秒、临时速度绝对值 2×（与 02 一致）、位移容差 12 **CSS** 像素。
-HOLD_MS = 500
+#: 门槛来自部署配置（config.json → player.hold_ms，默认 500）：测试不写死数值。
+#: 临时速度绝对值 2×、位移容差 12 **CSS** 像素是契约固定值。
+HOLD_MS = configured_hold_ms()
 TEMPORARY_RATE = 2.0
 SLOP_PX = 12.0
 
@@ -178,11 +180,11 @@ def _assert_trusted_channel(gesture: TouchGesture, *, engine: str) -> str:
 @pytest.mark.parametrize("mode", MODES)
 def test_waiting_phase_survives_every_in_tolerance_move_and_still_triggers(session: PlayerSession, mode: str) -> None:
     """P4：等待触发期间零位移、轻微位移、恰好 12 CSS 像素（两个轴向）、斜向紧贴门槛内侧都不取消；
-    连续多笔移动也不取消，满 500 毫秒仍触发 2×。"""
+    连续多笔移动也不取消，满门槛仍触发 2×。"""
     _open_playing_session(session, mode=mode)
     gesture = _press(session)
     session.clock.advance(200)
-    assert session.read().playback_rate == 1.0, "前置条件：尚未到 500 毫秒门槛"
+    assert session.read().playback_rate == 1.0, "前置条件：尚未到 门槛"
 
     for offset in _WITHIN_12:
         gesture.move_exact_by(*offset)
@@ -195,7 +197,7 @@ def test_waiting_phase_survives_every_in_tolerance_move_and_still_triggers(sessi
 
     session.clock.advance(HOLD_MS - 200)
     state = session.read()
-    assert state.playback_rate == TEMPORARY_RATE, "门槛内侧的移动不得影响满 500 毫秒触发 2×"
+    assert state.playback_rate == TEMPORARY_RATE, "门槛内侧的移动不得影响满门槛触发 2×"
     assert state.paused is False, "按住期间 Video 仍在播放"
 
     gesture.up()
@@ -240,7 +242,7 @@ def test_waiting_phase_move_beyond_12px_cancels_and_never_fires_later(
     _open_playing_session(session, mode=mode)
     gesture = _press(session)
     session.clock.advance(200)
-    assert session.read().playback_rate == 1.0, "前置条件：尚未到 500 毫秒门槛"
+    assert session.read().playback_rate == 1.0, "前置条件：尚未到 门槛"
 
     gesture.move_exact_by(*offset)
     distance = _last_distance(gesture)
@@ -345,7 +347,7 @@ def test_chromium_trusted_move_beyond_12px_cancels_waiting(session: PlayerSessio
     _open_playing_session(session, mode=mode)
     gesture = _press(session)
     session.clock.advance(200)
-    assert session.read().playback_rate == 1.0, "前置条件：尚未到 500 毫秒门槛"
+    assert session.read().playback_rate == 1.0, "前置条件：尚未到 门槛"
 
     gesture.move_by(16.0, 0.0)
     dx, dy, distance = _delivered_moves(gesture)[-1]

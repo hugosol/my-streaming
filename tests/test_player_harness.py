@@ -93,9 +93,12 @@ def test_fixture_serves_the_real_player_page_and_real_static_assets(harness: Pla
         .replace("{{playlist_url}}", harness.media_url)
         .replace("{{video_id}}", harness.video_id)
         .replace("{{subtitle_url}}", "")
+        .replace("{{hold_ms}}", str(int(harness.hold_ms)))
     )
     assert served == expected, "页面必须由真实模板渲染（唯一差异是播放源）"
+    assert "{{" not in served, f"模板变量必须全部替换，不得残留 {{{{…}}}}：{served}"
     assert f'data-playlist-url="{harness.media_url}"' in served
+    assert f'data-hold-ms="{int(harness.hold_ms)}"' in served, "页面必须带上实际生效的长按门槛"
     assert '<script src="/static/player.js"></script>' in served
 
     for name in ("player.js", "player.css"):

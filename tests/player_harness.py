@@ -20,9 +20,10 @@ def test_long_press_reaches_2x(session):
 
     gesture = session.touch()                                 # 一次按压序列（见下）
     gesture.down(*session.point_in_video(y_frac=0.3))         # 按在画面非控件区域
-    session.clock.advance(499)                                # 受控时间推进 499 毫秒
+    t = session.read().hold_ms                                # 页面生效门槛（config.json 可配）
+    session.clock.advance(t - 1)                              # 受控时间推进到门槛前 1 毫秒
     assert session.read().playback_rate == 1.0                # 门槛前
-    session.clock.advance(1)                                   # 满 500 毫秒
+    session.clock.advance(1)                                   # 满门槛
     assert session.read().playback_rate == 2.0                # 门槛后
     gesture.up()
     assert session.read().playback_rate == 1.0                # 松手恢复
@@ -88,7 +89,7 @@ def test_long_press_reaches_2x(session):
   （`performance`、`Date` 也被替换），但**媒体时钟仍由真实时间推进**：实测连续 30 轮
   `advance(500)`（假时间 +15s）后 `currentTime` 只动 +0.01~0.04，单次 `advance(600000)`
   与 `fast_forward("30:00")` 同样不推进媒体位置。Web Animations（`enterFS` 的 200ms 淡入）
-  照常完成；Python 侧轮询等待不受影响，所以 `wait_for*` 用真实等待，与 500 毫秒门槛无关。
+  照常完成；Python 侧轮询等待不受影响，所以 `wait_for*` 用真实等待，与长按门槛无关。
 - **夹具视频 30 秒**：媒体位置靠真实时间推进，用例跑久了会把短片播到结尾，届时
   Chromium 会 `paused=true` / `ended=true` 打断后续断言，所以留足余量。
 
@@ -99,6 +100,7 @@ def test_long_press_reaches_2x(session):
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -117,6 +119,22 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+DEFAULT_HOLD_MS = 500
+
+
+def configured_hold_ms() -> int:
+    """长按门槛来自部署配置（config.json → player.hold_ms，默认 500）：测试不写死数值。
+
+    读的是**部署配置**（公开输入）而不是实现里的变量；缺失/非法/越界由服务端同一个
+    归一化函数处理，保证测试与页面看到的是同一个门槛。
+    """
+    try:
+        config = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+    except Exception:
+        return DEFAULT_HOLD_MS
+    return server_app.normalize_hold_ms((config.get("player") or {}).get("hold_ms"))
 
 from server import app as server_app  # noqa: E402  (真实模板、真实渲染函数、真实静态目录)
 
@@ -170,6 +188,7 @@ _READ_STATE_JS = """
     currentTime: v.currentTime,
     ended: v.ended,
     readyState: v.readyState,
+    holdMs: Number.parseFloat(v.dataset.holdMs),
     customFullscreen: document.body.classList.contains('custom-fullscreen'),
     fsButtonVisible: shown(fs),
     exitButtonVisible: shown(exit),
@@ -271,6 +290,7 @@ class PlaybackState:
     custom_fullscreen: bool
     fs_button_visible: bool
     exit_button_visible: bool
+    hold_ms: int
 
 
 @dataclass(frozen=True)
@@ -531,7 +551,7 @@ _SYNTHETIC_TOUCH_JS = """
 
 
 class ControlledClock:
-    """500 毫秒门槛两侧的确定性判定：Playwright clock API 的薄封装。
+    """长按门槛两侧的确定性判定：Playwright clock API 的薄封装。
 
     用法：`goto(clock=True)`（导航前安装，避免加载期计时器被冻结卡住），
     然后 `freeze()` 冻结当前时刻，`advance(ms)` 跳时间。
@@ -635,6 +655,7 @@ class PlayerSession:
             custom_fullscreen=raw["customFullscreen"],
             fs_button_visible=raw["fsButtonVisible"],
             exit_button_visible=raw["exitButtonVisible"],
+            hold_ms=int(raw["holdMs"]),
         )
 
     def video_box(self) -> dict:
@@ -911,6 +932,7 @@ class PlayerHarness:
 
     def __init__(self, engine: str, playwright=None) -> None:
         self.engine = engine
+        self.hold_ms = configured_hold_ms()
         self.tmp_dir = Path(tempfile.mkdtemp(prefix=f"player-harness-{engine}-"))
         self.media_dir = self.tmp_dir / "media"
         self.media_dir.mkdir(parents=True, exist_ok=True)
@@ -1010,13 +1032,17 @@ class PlayerHarness:
         return PlayerSession(self, device_scale_factor=device_scale_factor)
 
     def render_player_page(self, video_id: str) -> str:
-        """真实模板 + 真实 `server.app._render`；唯一改动是播放源指向夹具视频。"""
-        return server_app._render(
-            server_app._PLAYER_TPL,
+        """真实模板 + 服务端唯一渲染入口；唯一改动是播放源指向夹具视频。
+
+        `self.hold_ms` 是本次生效的长按门槛（默认取部署配置 `config.json` →
+        `player.hold_ms`）；用例可临时改它来验证「配置真的生效」。
+        """
+        return server_app.render_player_page(
             title="player-harness",
             playlist_url=self.media_url,
             video_id=video_id,
             subtitle_url="",
+            hold_ms=int(self.hold_ms),
         )
 
     # -- 夹具视频 --------------------------------------------------------

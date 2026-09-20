@@ -78,6 +78,37 @@ def _render(template: str, **kwargs) -> str:
     return template
 
 
+DEFAULT_HOLD_MS = 500
+#: 合理范围：低于下限会让最短的点按也触发，高于上限会让长按形同失效。
+HOLD_MS_RANGE = (250, 1500)
+
+
+def normalize_hold_ms(raw, default: int = DEFAULT_HOLD_MS) -> int:
+    """把配置里的长按门槛归一化：非数字回退默认，越界夹取到合理范围。"""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    low, high = HOLD_MS_RANGE
+    return min(high, max(low, value))
+
+
+def render_player_page(*, title: str, playlist_url: str, video_id: str,
+                       subtitle_url: str, hold_ms: int) -> str:
+    """播放器页面渲染的唯一入口：真实模板 + 全部模板变量。
+
+    变量必须全部提供：`_render` 只做字符串替换，漏传会在页面上留下 `{{…}}`。
+    """
+    return _render(
+        _PLAYER_TPL,
+        title=title,
+        playlist_url=playlist_url,
+        video_id=video_id,
+        subtitle_url=subtitle_url,
+        hold_ms=hold_ms,
+    )
+
+
 def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
     # Load project config (lazy, from project root)
     _root = Path(__file__).parent.parent
@@ -123,6 +154,9 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
 
     def _get_worker_port() -> int:
         return int(_load_config().get("worker_port", 8899))
+
+    def _get_hold_ms() -> int:
+        return normalize_hold_ms((_load_config().get("player") or {}).get("hold_ms"))
 
     class StreamingHandler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
@@ -343,11 +377,12 @@ def make_handler(dir_path: str, transcoder: Transcoder, temp_root: Path):
             if v is None:
                 self._serve_404()
                 return
-            html_content = _render(_PLAYER_TPL,
+            html_content = render_player_page(
                 title=html.escape(v.name),
                 playlist_url=f"/stream/{video_id}/playlist.m3u8",
                 video_id=video_id,
                 subtitle_url=f"/stream/{video_id}/subtitles.vtt" if v.has_subtitle else "",
+                hold_ms=_get_hold_ms(),
             )
             self._respond_html(html_content)
 

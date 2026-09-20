@@ -75,15 +75,23 @@ window.addEventListener('orientationchange', function() {
   if (document.body.classList.contains('custom-fullscreen')) exitFS();
 });
 
-// 长按临时倍速：正在播放时按住画面非控件区域满 500 毫秒临时切到固定 2×，
+// 长按临时倍速：正在播放时按住画面非控件区域满「配置门槛」临时切到固定 2×，
 // 松手立即恢复长按前的实际速度；暂停时不触发，也不开始播放。
 // 手指相对按下点滑动超过 HOLD_SLOP_PX 时本次手势结束（等待期取消等待，加速期恢复原速）。
 // 切到后台、进入/退出自制全屏、系统取消触摸同样结束本次手势（唯一的结束出口 holdEnd）。
 // 监听挂在视频元素上：自制全屏按钮等控件不是它的子节点，落在控件上的触摸不会进入本手势；
 // 全程不调用 preventDefault，原生控件与短按行为照旧。
-var HOLD_MS = 500;
+// 门槛来自服务端注入的配置（config.json → player.hold_ms，默认 500）；
+// 缺失或非法时回退默认值，并夹取到合理范围，避免配置笔误让手势失控。
+function holdMsFromConfig() {
+  var raw = parseFloat(v.dataset.holdMs);
+  if (!isFinite(raw)) return 500;
+  return Math.min(1500, Math.max(200, raw));
+}
+var HOLD_MS = holdMsFromConfig();
 var HOLD_RATE = 2;
 var HOLD_SLOP_PX = 12; // 单位是 CSS 像素：clientX/clientY 就是 CSS 像素（不随缩放/设备像素比变化）
+
 var holdGesture = null;
 
 function holdIsPlaying() { return !v.paused && !v.ended; }

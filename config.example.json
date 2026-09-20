@@ -21,5 +21,8 @@
   "punctuation_check": {
     "expected_per_lines": 0.333,
     "threshold_factor": 0.4
+  },
+  "player": {
+    "hold_ms": 500
   }
 }

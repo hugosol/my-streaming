@@ -10,15 +10,15 @@
 | P6 | 系统取消触摸（等待期 / 加速期）：恢复原速、不遗留临时倍速 | 按压同上：chromium `Input.dispatchTouchEvent` 的 `touchCancel`（可信）/ webkit 合成 `touchcancel`（弱证据） |
 | P6 | 中断不启动播放：三种中断分别覆盖播放中与暂停中 | 同上（观察 `video.paused`） |
 | P7 | 已结束手势不复活：滑动取消后移回按下点、后台往返、切换观看模式后都不出现 2× | 越界移动：chromium 真实 16 CSS 像素 touchmove（可信）/ webkit 合成精确移动（弱证据） |
-| P7 | 取消后重新按下必须重新等待完整 500 毫秒（门槛两侧，两种模式；取消 = 系统取消 / 全屏切换 / 后台往返） | 受控时间（`clock.advance`）+ 按压同上 |
+| P7 | 取消后重新按下必须重新等待完整 门槛（门槛两侧，两种模式；取消 = 系统取消 / 全屏切换 / 后台往返） | 受控时间（`clock.advance`）+ 按压同上 |
 | P10 | 已识别长按正常松手结束、被系统取消后，播放/暂停状态不变 | 按压同上 |
-| P10 | 短于门槛的按压（0 / 200 / 499 毫秒）不改变速度、不改变播放/暂停状态 | 按压同上；另用一次**可信真实 tap**核对引擎基线（见下） |
+| P10 | 短于门槛的按压（0 / 门槛的 1/4 / 门槛前 1 毫秒）不改变速度、不改变播放/暂停状态 | 按压同上；另用一次**可信真实 tap**核对引擎基线（见下） |
 | 不新增提示 | 切到后台（含返回前台）与系统取消两条中断路径上，可见元素清单与可见文字与按压前一致（`document.querySelectorAll('body *')` 快照）；全屏切换会合法地换掉控件，故该行不覆盖 | 可见 DOM 快照（两引擎） |
 
 **P10 的「与改动前一致」怎么判**：`01/02` 实测并记录的平台基线是「webkit 的真实 tap 点击画面会切换
 播放/暂停，chromium 的 touch tap 不会」。本文件因此分两层断言，不靠「无视 `paused`」蒙混：
 
-1. 子门槛按压序列（chromium = 可信 CDP 按压；webkit = 合成事件，弱证据）在 0 / 200 / 499 毫秒三种时长下
+1. 子门槛按压序列（chromium = 可信 CDP 按压；webkit = 合成事件，弱证据）在 0 / 门槛的 1/4 / 门槛前 1 毫秒三种时长下
    速度不变、`paused` 不变——与按压前的同一状态一致（同引擎多种子门槛时长结果一致）；
 2. 每个引擎再用一次**引擎级真实 tap**核对基线本身没有被本次改动掩平：webkit 必须切换一次、chromium
    必须不切换，两者速度都保持长按前速度。
@@ -44,6 +44,7 @@ import pytest
 
 from player_harness import (  # noqa: F401  (下面这些是有名字的 pytest 夹具，必须导入本模块才可见)
     PLAYWRIGHT_ENGINES,
+    configured_hold_ms,
     PlayerSession,
     TouchGesture,
     harness,
@@ -54,13 +55,14 @@ from player_harness import (  # noqa: F401  (下面这些是有名字的 pytest 
 
 pytestmark = pytest.mark.parametrize("engine", PLAYWRIGHT_ENGINES)
 
-#: 契约固定值：门槛 500 毫秒、临时速度绝对值 2×、位移容差 12 CSS 像素。
-HOLD_MS = 500
+#: 门槛来自部署配置（config.json → player.hold_ms，默认 500）：测试不写死数值。
+#: 临时速度绝对值 2×、位移容差 12 CSS 像素是契约固定值。
+HOLD_MS = configured_hold_ms()
 TEMPORARY_RATE = 2.0
 SLOP_PX = 12.0
 
-#: 门槛前先停住的时长（与 02/03 的门槛两侧用例同一口径）。
-WAITING_MS = 200
+#: 门槛前先停住的时长：取门槛的 1/4，保证「连续两次等待」仍停在门槛前（随配置变化）。
+WAITING_MS = HOLD_MS // 4
 
 #: 「旧手势不复活」的观察窗口：中断结束后推进这么久仍不得出现 2×。
 REVIVAL_MS = 2000
@@ -152,7 +154,7 @@ def _set_rate(target: PlayerSession, rate: float) -> None:
 def _press_into_phase(target: PlayerSession, *, phase: str, rate: float | None = None) -> TouchGesture:
     """在**已打开**的会话上按下，并把受控时间推进到中断前的指定阶段。
 
-    `waiting` = 停在门槛前的等待期；`accelerating` = 已满 500 毫秒、正在临时倍速。
+    `waiting` = 停在门槛前的等待期；`accelerating` = 已满 门槛、正在临时倍速。
     """
     assert phase in PHASES
     if rate is not None:
@@ -164,7 +166,7 @@ def _press_into_phase(target: PlayerSession, *, phase: str, rate: float | None =
         target.clock.advance(HOLD_MS - WAITING_MS)
         assert target.read().playback_rate == TEMPORARY_RATE, "前置条件：按压已进入临时倍速"
     else:
-        assert target.read().playback_rate == expected, "前置条件：按压仍停在 500 毫秒门槛前"
+        assert target.read().playback_rate == expected, "前置条件：按压仍停在 门槛前"
     return gesture
 
 
@@ -296,7 +298,7 @@ def test_entering_custom_fullscreen_ends_waiting_press(session: PlayerSession) -
     按钮是真实点击（`#fs-btn`），所以中断本身是引擎级真实输入；按压序列的通道见 `evidence`。
     """
     gesture = _open_and_press(session, mode="inline", phase="waiting")
-    session.clock.advance(WAITING_MS)  # 累计 400 毫秒，仍在门槛内
+    session.clock.advance(WAITING_MS)  # 累计半个门槛，仍在门槛内
     assert session.read().playback_rate == 1.0, "前置条件：仍在等待期"
 
     switch = _switch_viewing_mode(session, mode="inline")
@@ -389,7 +391,7 @@ def test_page_hidden_ends_waiting_press_and_returning_foreground_revives_nothing
     """
     gesture = _open_and_press(session, mode=mode, phase="waiting")
     baseline = _visible_content(session)
-    session.clock.advance(WAITING_MS)  # 累计 400 毫秒，仍在门槛内
+    session.clock.advance(WAITING_MS)  # 累计半个门槛，仍在门槛内
     assert session.read().playback_rate == 1.0, "前置条件：仍在等待期"
 
     evidence = _set_page_visibility(session, hidden=True)
@@ -569,9 +571,9 @@ def test_ended_press_never_revives_after_viewing_mode_switch(session: PlayerSess
 
 @pytest.mark.parametrize("mode", MODES)
 def test_press_after_cancel_waits_full_hold_ms_again(session: PlayerSession, mode: str) -> None:
-    """P7：系统取消后重新按下必须重新等待完整 500 毫秒（受控时间验证门槛两侧）。
+    """P7：系统取消后重新按下必须重新等待完整 门槛（受控时间验证门槛两侧）。
 
-    第一次按压已经消耗 200 毫秒；若实现沿用了之前的按住时长，第二次按压会在 300 毫秒内触发 2×，
+    第一次按压只消耗了 WAITING_MS；若实现沿用了之前的按住时长，第二次按压会在远早于门槛时触发 2×，
     门槛前的断言就会失败。
     """
     first = _open_and_press(session, mode=mode, phase="waiting")
@@ -583,7 +585,7 @@ def test_press_after_cancel_waits_full_hold_ms_again(session: PlayerSession, mod
     assert session.read().playback_rate == 1.0, "取消后重新按下不得沿用之前的按住时长（门槛前）"
 
     session.clock.advance(1)
-    assert session.read().playback_rate == TEMPORARY_RATE, "重新按下满 500 毫秒才触发 2×"
+    assert session.read().playback_rate == TEMPORARY_RATE, "重新按下满 门槛才触发 2×"
 
     second.up()
     assert session.read().playback_rate == 1.0, "松手恢复原速"
@@ -591,7 +593,7 @@ def test_press_after_cancel_waits_full_hold_ms_again(session: PlayerSession, mod
 
 
 def test_press_after_fullscreen_interruption_waits_full_hold_ms_again(session: PlayerSession) -> None:
-    """P7：进入自制全屏结束手势后，在新模式里重新按下同样要重新等待完整 500 毫秒。"""
+    """P7：进入自制全屏结束手势后，在新模式里重新按下同样要重新等待完整 门槛。"""
     first = _open_and_press(session, mode="inline", phase="waiting")
     session.clock.advance(WAITING_MS)
     _switch_viewing_mode(session, mode="inline")
@@ -602,7 +604,7 @@ def test_press_after_fullscreen_interruption_waits_full_hold_ms_again(session: P
     assert session.read().playback_rate == 1.0, "自制全屏里重新按下不得沿用之前已按住的时间"
 
     session.clock.advance(1)
-    assert session.read().playback_rate == TEMPORARY_RATE, "满 500 毫秒后触发 2×"
+    assert session.read().playback_rate == TEMPORARY_RATE, "满 门槛后触发 2×"
 
     second.up()
     assert session.read().playback_rate == 1.0
@@ -611,7 +613,7 @@ def test_press_after_fullscreen_interruption_waits_full_hold_ms_again(session: P
 
 @pytest.mark.parametrize("mode", MODES)
 def test_press_after_background_roundtrip_waits_full_hold_ms_again(session: PlayerSession, mode: str) -> None:
-    """P7：后台往返结束手势后，重新按下同样要重新等待完整 500 毫秒（弱证据：合成可见性变化）。"""
+    """P7：后台往返结束手势后，重新按下同样要重新等待完整 门槛（弱证据：合成可见性变化）。"""
     first = _open_and_press(session, mode=mode, phase="waiting")
     session.clock.advance(WAITING_MS)
     evidence = _set_page_visibility(session, hidden=True)
@@ -625,7 +627,7 @@ def test_press_after_background_roundtrip_waits_full_hold_ms_again(session: Play
     assert session.read().playback_rate == 1.0, "返回前台后重新按下不得沿用之前的按住时长"
 
     session.clock.advance(1)
-    assert session.read().playback_rate == TEMPORARY_RATE, "重新按下满 500 毫秒才触发 2×"
+    assert session.read().playback_rate == TEMPORARY_RATE, "重新按下满 门槛才触发 2×"
 
     second.up()
     assert session.read().playback_rate == 1.0
@@ -664,7 +666,7 @@ def test_recognized_long_press_release_and_cancel_do_not_toggle_playback(session
 
 @pytest.mark.parametrize("mode", MODES)
 def test_sub_threshold_press_keeps_pre_change_behaviour(session: PlayerSession, mode: str) -> None:
-    """P10：短于门槛的按压（0 / 200 / 499 毫秒）不改变速度、不改变播放/暂停状态，并与引擎基线一致。
+    """P10：短于门槛的按压（0 / 门槛的 1/4 / 门槛前 1 毫秒）不改变速度、不改变播放/暂停状态，并与引擎基线一致。
 
     两层断言见模块 docstring：子门槛按压序列本身的行为，以及可信真实 tap 的引擎基线（webkit 切换、
     chromium 不切换）没有被本次改动掩平。按压序列在 chromium 上全程可信；webkit 上只能是合成事件，

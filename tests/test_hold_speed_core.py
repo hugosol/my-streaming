@@ -4,11 +4,11 @@
 
 | 承诺 | 本文件覆盖 | 输入证据强度 |
 |---|---|---|
-| P1 | 门槛两侧（499 / 500 毫秒）、固定 2×、持续按住保持 2×、左/中/右非控件区域、两种观看模式、1× 与 1.5× 起步 | chromium：CDP `Input.dispatchTouchEvent`（引擎级真实触摸）；webkit：页面内合成 `TouchEvent`（弱证据） |
+| P1 | 门槛两侧（HOLD_MS-1 / HOLD_MS，随配置）、固定 2×、持续按住保持 2×、左/中/右非控件区域、两种观看模式、1× 与 1.5× 起步 | chromium：CDP `Input.dispatchTouchEvent`（引擎级真实触摸）；webkit：页面内合成 `TouchEvent`（弱证据） |
 | P2 | 1×→2×→1×、1.5×→2×→1.5×、未达门槛松手不变、两种模式 | 同上 |
-| P3 | 暂停下按住远超 500 毫秒再松开：仍暂停、速度不变、未因此开始播放、两种模式 | 同上 |
+| P3 | 暂停下按住远超门槛再松开：仍暂停、速度不变、未因此开始播放、两种模式 | 同上 |
 | P8 | 等待/加速/恢复三阶段 × 两种模式：可见元素清单与可见文字与基线一致 | 同上（可见 DOM 快照） |
-| P9 | 自制全屏进入/退出按钮：停留超过 500 毫秒不触发、按钮仍照常工作；原生控件条的可见操作未被吞掉（桌面证据，仅 chromium） | 按压同上；按钮点亮用引擎级真实 tap；原生控件用真实鼠标（见用例说明） |
+| P9 | 自制全屏进入/退出按钮：停留超过门槛不触发、按钮仍照常工作；原生控件条的可见操作未被吞掉（桌面证据，仅 chromium） | 按压同上；按钮点亮用引擎级真实 tap；原生控件用真实鼠标（见用例说明） |
 
 观察口径：只读 Video 元素公开属性（`paused` / `playbackRate` / `currentTime` / `readyState`）、
 `body.custom-fullscreen`、元素可见性与 `document.elementFromPoint` 命中结果；不读实现私有变量、
@@ -25,6 +25,7 @@ import pytest
 
 from player_harness import (  # noqa: F401  (下面这些是有名字的 pytest 夹具，必须导入本模块才可见)
     PLAYWRIGHT_ENGINES,
+    configured_hold_ms,
     PlayerSession,
     harness,
     harness_factory,
@@ -34,8 +35,9 @@ from player_harness import (  # noqa: F401  (下面这些是有名字的 pytest 
 
 pytestmark = pytest.mark.parametrize("engine", PLAYWRIGHT_ENGINES)
 
-#: 契约固定值：门槛 500 毫秒、临时速度绝对值 2×（不是当前速度乘二）。
-HOLD_MS = 500
+#: 门槛来自部署配置（config.json → player.hold_ms，默认 500）：测试不写死数值。
+#: 临时速度绝对值 2× 是契约固定值（不是当前速度乘二）。
+HOLD_MS = configured_hold_ms()
 TEMPORARY_RATE = 2.0
 
 MODES = ("inline", "fullscreen")
@@ -138,7 +140,7 @@ def _visible_content(session: PlayerSession) -> dict:
 
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("start_rate", (1.0, 1.5))
-def test_hold_500ms_switches_to_fixed_2x_and_release_restores_previous_rate(
+def test_hold_switches_to_fixed_2x_and_release_restores_previous_rate(
     session: PlayerSession, mode: str, start_rate: float
 ) -> None:
     """P1 + P2：门槛两侧、固定 2×、松手恢复长按前的实际速度（1× 与 1.5× 起步，两种模式）。"""
@@ -146,10 +148,10 @@ def test_hold_500ms_switches_to_fixed_2x_and_release_restores_previous_rate(
     gesture, _ = _press_picture(session)
 
     session.clock.advance(HOLD_MS - 1)
-    assert session.read().playback_rate == start_rate, "未满 500 毫秒不得改变速度（门槛前）"
+    assert session.read().playback_rate == start_rate, "未达门槛不得改变速度（门槛前）"
 
     session.clock.advance(1)
-    assert session.read().playback_rate == TEMPORARY_RATE, "满 500 毫秒必须变为固定 2×（门槛后）"
+    assert session.read().playback_rate == TEMPORARY_RATE, "满门槛必须变为固定 2×（门槛后）"
 
     evidence = _evidence(gesture, engine=session.harness.engine, what="门槛两侧按压")
     gesture.up()
@@ -159,7 +161,7 @@ def test_hold_500ms_switches_to_fixed_2x_and_release_restores_previous_rate(
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_release_before_500ms_leaves_rate_untouched(session: PlayerSession, mode: str) -> None:
+def test_release_before_threshold_leaves_rate_untouched(session: PlayerSession, mode: str) -> None:
     """P2：未达门槛松手不改变速度，且不留下会延迟触发的等待。"""
     _open_playing_session(session, mode=mode)
 
@@ -229,7 +231,7 @@ def test_left_center_right_non_control_areas_all_trigger(session: PlayerSession,
 def test_paused_hold_neither_plays_nor_enters_temporary_rate(
     session: PlayerSession, mode: str, start_rate: float
 ) -> None:
-    """P3：暂停时按住超过 500 毫秒再松开，仍暂停、速度不变，且没有因此开始播放。"""
+    """P3：暂停时按住超过门槛再松开，仍暂停、速度不变，且没有因此开始播放。"""
     _open_playing_session(session, mode=mode, rate=start_rate)
     session.page.evaluate("() => { document.getElementById('v').pause(); }")
     session.wait_for(lambda state: state.paused, "Video 进入暂停")
@@ -284,7 +286,7 @@ def test_no_visible_prompt_appears_in_waiting_accelerating_or_restoring_phase(
 
 
 def test_custom_fullscreen_buttons_keep_working_and_never_trigger_the_hold(session: PlayerSession) -> None:
-    """P9：自制全屏进入/退出按钮照常工作；在按钮上停留超过 500 毫秒也不触发临时倍速。"""
+    """P9：自制全屏进入/退出按钮照常工作；在按钮上停留超过门槛也不触发临时倍速。"""
     _open_playing_session(session, mode="inline")
 
     for selector, expected_after in (("#fs-btn", True), ("#fs-exit-btn", False)):
@@ -298,7 +300,7 @@ def test_custom_fullscreen_buttons_keep_working_and_never_trigger_the_hold(sessi
             session.clock.advance(HOLD_MS - 1)
             assert session.read().playback_rate == 1.0, f"{selector} 上按压未满门槛不得改变速度"
             session.clock.advance(HOLD_MS * 3)
-            assert session.read().playback_rate == 1.0, f"{selector} 上停留超过 500 毫秒不得触发临时倍速"
+            assert session.read().playback_rate == 1.0, f"{selector} 上停留超过门槛不得触发临时倍速"
             gesture.cancel()
             assert session.read().playback_rate == 1.0
         _evidence(gesture, engine=session.harness.engine, what=f"{selector} 长时间按压")
