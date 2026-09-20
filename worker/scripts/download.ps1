@@ -60,16 +60,43 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-# ===== Repair phase =====
-Write-Output ""
-Write-Output "--- Repairing SRT subtitle overlaps ---"
-
+# ===== Subtitle acquisition =====
+# YouTube withholds auto captions from the default clients unless a PO token is
+# provided, and yt-dlp still exits 0 with no subtitle file. The embedded web
+# client serves the same en-orig track without a PO token, so retry with it
+# before giving up. Exit code 3 tells the worker "video downloaded, no SRT".
 $srtFiles = Get-ChildItem -Path $OutputDir -Filter "*.srt" -File | Where-Object { -not $existingSrt.ContainsKey($_.FullName) }
 
 if ($srtFiles.Count -eq 0) {
-    Write-Output "No SRT files found to repair."
-    exit 0
+    Write-Output ""
+    Write-Output "No subtitles downloaded by the default client. Retrying with web_embedded client..."
+    $fallbackArgs = @(
+        "--skip-download"
+        "--write-auto-subs"
+        "--sub-langs", "en-orig"
+        "--sub-format", "srt"
+        "--extractor-args", "youtube:player_client=web_embedded"
+        "--cookies-from-browser", $CookiesBrowser
+        "-o", "%(title)s.%(ext)s"
+    ) + $proxyArgs + @(
+        "--js-runtimes", "node"
+        $Url
+    )
+    & yt-dlp @fallbackArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output "Subtitle fallback exited with code $LASTEXITCODE."
+    }
+    $srtFiles = Get-ChildItem -Path $OutputDir -Filter "*.srt" -File | Where-Object { -not $existingSrt.ContainsKey($_.FullName) }
 }
+
+if ($srtFiles.Count -eq 0) {
+    Write-Error "No English subtitles could be downloaded (default and web_embedded clients). YouTube may not have generated captions for this video yet."
+    exit 3
+}
+
+# ===== Repair phase =====
+Write-Output ""
+Write-Output "--- Repairing SRT subtitle overlaps ---"
 
 foreach ($srt in $srtFiles) {
     $outPath = Join-Path $OutputDir ($srt.Name -replace '-orig', '')

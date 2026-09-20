@@ -255,6 +255,31 @@ def _execute_pipeline(job_id: str, url: str) -> None:
         print(f"[PIPELINE] Unexpected error in job {job_id}: {e}")
 
 
+def _save_mp4_to_library(job_dir: Path, video_dir: Path) -> tuple[str, str]:
+    """Move downloaded MP4s from the job dir into the video library.
+
+    Returns (video_name, video_md5); empty strings when no MP4 exists.
+    """
+    mp4_files = sorted(job_dir.glob("*.mp4"))
+    if not mp4_files:
+        return "", ""
+    main = mp4_files[0]
+    vname = main.stem
+    vmd5 = hashlib.md5(main.name.encode()).hexdigest()[:8]
+    for mp4 in mp4_files:
+        mp4.replace(video_dir / mp4.name)
+    return vname, vmd5
+
+
+def _fail_missing_subtitles(job_id: str, job_dir: Path, video_dir: Path) -> None:
+    """No SRT was downloaded: keep the video (if any) and fail with a clear error."""
+    vname, vmd5 = _save_mp4_to_library(job_dir, video_dir)
+    saved = "，视频已保存" if vname else ""
+    _update_job(job_id, status="failed",
+                error=f"未找到英文字幕（视频可能尚无字幕）{saved}",
+                video_name=vname, video_md5=vmd5)
+
+
 def _do_download(job_id: str, url: str) -> Path | None:
     """Download video + SRT. Returns srt_path on success, None on failure/no-SRT."""
     video_dir = _video_dir()
@@ -272,20 +297,22 @@ def _do_download(job_id: str, url: str) -> Path | None:
         download_cmd.extend(["-Proxy", proxy])
 
     rc = _run_subprocess(download_cmd, job_dir, "DOWNLOAD")
-    if rc != 0:
-        _update_job(job_id, status="failed", error=f"下载失败 (exit code {rc})")
-        return None
 
     srt_files = sorted(job_dir.glob("*.en.srt"))
     if not srt_files:
         srt_files = sorted(job_dir.glob("*.srt"))
+
+    if rc == 3:
+        # download.ps1 exit 3: video downloaded, but no English subtitles exist.
+        _fail_missing_subtitles(job_id, job_dir, video_dir)
+        return None
+    if rc != 0:
+        _update_job(job_id, status="failed", error=f"下载失败 (exit code {rc})")
+        return None
+
     if not srt_files:
-        mp4_files = sorted(job_dir.glob("*.mp4"))
-        vname = mp4_files[0].stem if mp4_files else ""
-        vmd5 = hashlib.md5(mp4_files[0].name.encode()).hexdigest()[:8] if mp4_files else ""
-        _update_job(job_id, stage="done", status="success", progress="", video_name=vname, video_md5=vmd5)
-        for mp4 in mp4_files:
-            mp4.replace(video_dir / mp4.name)
+        # Defensive: never report success when the script produced no subtitles.
+        _fail_missing_subtitles(job_id, job_dir, video_dir)
         return None
 
     mp4_files = sorted(job_dir.glob("*.mp4"))
