@@ -38,6 +38,7 @@ v.addEventListener('webkitendfullscreen', unlockOrientation);
 var fsBtn = document.getElementById('fs-btn');
 var fsExitBtn = document.getElementById('fs-exit-btn');
 function enterFS() {
+  holdEnd(); // 观看模式切换一开始就结束本次长按，不让手势跨过 200 毫秒的切换动画
   var pc = document.getElementById('player-container');
   var fadeOut = pc.animate({ opacity: [1, 0] }, { duration: 200, fill: 'forwards' });
   fadeOut.onfinish = function() {
@@ -53,6 +54,7 @@ function enterFS() {
   };
 }
 function exitFS() {
+  holdEnd(); // 同 enterFS：旋转/退出全屏同样结束本次长按
   var pc = document.getElementById('player-container');
   var fadeOut = pc.animate({ opacity: [1, 0] }, { duration: 200, fill: 'forwards' });
   fadeOut.onfinish = function() {
@@ -72,3 +74,54 @@ fsExitBtn.addEventListener('click', function(e) { e.stopPropagation(); exitFS();
 window.addEventListener('orientationchange', function() {
   if (document.body.classList.contains('custom-fullscreen')) exitFS();
 });
+
+// 长按临时倍速：正在播放时按住画面非控件区域满 500 毫秒临时切到固定 2×，
+// 松手立即恢复长按前的实际速度；暂停时不触发，也不开始播放。
+// 手指相对按下点滑动超过 HOLD_SLOP_PX 时本次手势结束（等待期取消等待，加速期恢复原速）。
+// 切到后台、进入/退出自制全屏、系统取消触摸同样结束本次手势（唯一的结束出口 holdEnd）。
+// 监听挂在视频元素上：自制全屏按钮等控件不是它的子节点，落在控件上的触摸不会进入本手势；
+// 全程不调用 preventDefault，原生控件与短按行为照旧。
+var HOLD_MS = 500;
+var HOLD_RATE = 2;
+var HOLD_SLOP_PX = 12; // 单位是 CSS 像素：clientX/clientY 就是 CSS 像素（不随缩放/设备像素比变化）
+var holdGesture = null;
+
+function holdIsPlaying() { return !v.paused && !v.ended; }
+
+function holdBegin(x, y) {
+  if (holdGesture) return;
+  // 判定基础在按下瞬间固定：起点坐标与当时的速度（后续位移判定复用同一份记录）。
+  var gesture = { x: x, y: y, rate: v.playbackRate, playing: holdIsPlaying(), triggered: false };
+  holdGesture = gesture;
+  gesture.timer = setTimeout(function() {
+    if (!gesture.playing || !holdIsPlaying()) return; // 门槛点仍须正在播放
+    gesture.triggered = true;
+    v.playbackRate = HOLD_RATE;
+  }, HOLD_MS);
+}
+
+function holdEnd() {
+  if (!holdGesture) return;
+  var gesture = holdGesture;
+  holdGesture = null;
+  clearTimeout(gesture.timer);
+  if (gesture.triggered) v.playbackRate = gesture.rate;
+}
+
+v.addEventListener('touchstart', function(e) {
+  if (e.touches.length !== 1) { holdEnd(); return; } // 多指或异常序列不属于本手势
+  holdBegin(e.touches[0].clientX, e.touches[0].clientY);
+});
+v.addEventListener('touchmove', function(e) {
+  // 位移按「按下点到当前点的直线距离」算，不是累计路径；起点只取 holdGesture 里按下瞬间的记录。
+  if (!holdGesture || e.touches.length !== 1) return;
+  var dx = e.touches[0].clientX - holdGesture.x;
+  var dy = e.touches[0].clientY - holdGesture.y;
+  if (Math.hypot(dx, dy) > HOLD_SLOP_PX) holdEnd(); // 结束走唯一出口：清空手势、清计时器、按需恢复原速
+});
+v.addEventListener('touchend', function(e) {
+  if (e.touches.length === 0) holdEnd();
+});
+v.addEventListener('touchcancel', function() { holdEnd(); });
+// 切到后台：结束本次长按（等待期取消等待，加速期恢复原速）；回到前台不会复活旧手势。
+document.addEventListener('visibilitychange', function() { if (document.hidden) holdEnd(); });

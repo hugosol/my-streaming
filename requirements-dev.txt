@@ -1,0 +1,5 @@
+# 测试专用依赖（应用运行依赖见 requirements.txt）。
+# 浏览器二进制不在 pip 里，需要单独安装：
+#     python -m playwright install chromium webkit
+# 缺 playwright 或浏览器时 tests/test_player_harness.py 整组自动跳过。
+playwright>=1.63
