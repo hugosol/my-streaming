@@ -6,7 +6,7 @@ Issues tracked as local markdown files under `.scratch/<feature>/`, with decisio
 
 ### Triage labels
 
-Decision tickets use `open`/`claimed`/`resolved`; implementation tickets use `ready-for-agent`/`ready-for-human`/`in-progress`/`closed`; shared labels are `needs-triage`/`needs-info`/`wontfix`. See `docs/agents/triage-labels.md`.
+Implementation tickets use `needs-triage`/`needs-info`/`ready-for-agent`/`ready-for-human`/`wontfix`, with `in-progress`/`closed` tracking execution. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
